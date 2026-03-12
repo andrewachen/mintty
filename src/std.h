@@ -3,9 +3,16 @@
 
 #ifdef __CYGWIN__
 #include <cygwin/version.h>
+#elif defined(__MINGW32__)
+#define CYGWIN_VERSION_DLL_MAJOR 0
+#define CYGWIN_VERSION_API_MINOR 0
 #else
 #define CYGWIN_VERSION_DLL_MAJOR 1007
 #define CYGWIN_VERSION_API_MINOR 201
+#endif
+
+#ifdef __MINGW32__
+#include "compat_mingw.h"
 #endif
 
 //unhide some definitions
@@ -42,7 +49,7 @@ static inline void delete(const void *p) { free((void *)p); }
 extern char * tmpdir(void);
 
 
-#if CYGWIN_VERSION_API_MINOR >= 91
+#if CYGWIN_VERSION_API_MINOR >= 91 && !defined(__MINGW32__)
 #include <argz.h>
 #else
 extern int argz_create (char *const argv[], char **argz, size_t *argz_len);
@@ -50,7 +57,7 @@ extern void argz_stringify (char *argz, size_t argz_len, int sep);
 #endif
 
 
-#if CYGWIN_VERSION_API_MINOR >= 74
+#if CYGWIN_VERSION_API_MINOR >= 74 || defined(__MINGW32__)
 #include <wctype.h>
 #else
 extern int iswalnum(wint_t);
@@ -59,12 +66,12 @@ extern int iswspace(wint_t);
 #endif
 
 
-#if CYGWIN_VERSION_API_MINOR < 53
+#if CYGWIN_VERSION_API_MINOR < 53 || defined(__MINGW32__)
 #define strlcpy(dst, src, len) snprintf(dst, len, "%s", src)
 #endif
 
 
-#if CYGWIN_VERSION_API_MINOR < 70
+#if CYGWIN_VERSION_API_MINOR < 70 || defined(__MINGW32__)
 extern int asprintf(char **, const char *, ...);
 extern int vasprintf(char **, const char *, va_list);
 #endif
@@ -81,7 +88,12 @@ extern char *asform(const char *fmt, ...);
 #else
 #define WINVER 0x0501
 #endif
+#ifndef _WIN32_WINNT
 #define _WIN32_WINNT WINVER
+#endif
+#ifndef _WIN32_IE
+#define _WIN32_IE WINVER
+#endif
 
 #include <windef.h>
 

@@ -214,7 +214,7 @@ sigsegv(int sig)
   MessageBoxA(0, debugtag, "Critical Error", MB_ICONSTOP);
 }
 
-inline static void
+__attribute__((unused)) inline static void
 crashtest()
 {
   char * x0 = 0;
@@ -353,6 +353,7 @@ deliver_available_version()
 
   version_retrieving = true;
 
+#ifndef __MINGW32__
   if (fork())
     return;  // do nothing in parent (or on failure)
   //setsid();  // failed attempt to avoid busy hourglass
@@ -397,6 +398,7 @@ deliver_available_version()
   printf("deliver_available_version notified %d\n", ok);
 #endif
   exit(0);
+#endif
 }
 
 
@@ -850,6 +852,25 @@ win_open_config(void)
 }
 
 
+#ifdef __MINGW32__
+static void
+setlabel_(HWND parent, int id, wstring label)
+{
+  HWND button = GetDlgItem(parent, id);
+#ifdef debug_message_box
+  if (button) {
+    wchar buf [99];
+    GetWindowTextW(button, buf, 99);
+    printf("%d [%8p] <%ls> -> <%ls>\n", id, button, buf, label);
+  }
+  else
+    printf("%d %% (<%ls>)\n", id, label);
+#endif
+  if (button)
+    SetWindowTextW(button, label);
+}
+#endif  /* __MINGW32__: setlabel */
+
 static wstring oklabel = null;
 static int oktype = MB_OK;
 
@@ -860,6 +881,7 @@ set_labels(int nCode, WPARAM wParam, LPARAM lParam)
 
 #define dont_debug_message_box
 
+#ifndef __MINGW32__
   void setlabel(int id, wstring label) {
     HWND button = GetDlgItem((HWND)wParam, id);
 #ifdef debug_message_box
@@ -874,6 +896,9 @@ set_labels(int nCode, WPARAM wParam, LPARAM lParam)
     if (button)
       SetWindowTextW(button, label);
   }
+#else  /* __MINGW32__: use file-scope setlabel with explicit parent arg */
+  #define setlabel(id, label) setlabel_((HWND)wParam, (id), (label))
+#endif
 
   if (nCode == HCBT_ACTIVATE) {
 #ifdef debug_message_box
@@ -912,6 +937,9 @@ set_labels(int nCode, WPARAM wParam, LPARAM lParam)
   }
 
   //return CallNextHookEx(0, nCode, wParam, lParam);
+#ifdef __MINGW32__
+  #undef setlabel
+#endif
   return 0;  // 0: let default dialog box procedure process the message
 }
 

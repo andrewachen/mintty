@@ -523,6 +523,10 @@ do_bidi(bool autodir, int paragraphLevel, bool explicitRTL, bool box_mirror,
   uchar tempType;
   int i, j;
 
+#ifdef __MINGW32__
+  // MinGW: Clang doesn't support GCC nested functions; use macro equivalent
+  #define bidi_class_of(i) (explicitRTL ? (uchar)R : bidi_class(line[i].wc))
+#else
   uchar bidi_class_of(int i) {
     ucschar c = line[i].wc;
 
@@ -558,6 +562,7 @@ do_bidi(bool autodir, int paragraphLevel, bool explicitRTL, bool box_mirror,
 
     return bidi_class(c);
   }
+#endif
 
  /* Rule (P1)  NOT IMPLEMENTED
   * P1. Split the text into separate paragraphs. A paragraph separator is
@@ -712,6 +717,23 @@ do_bidi(bool autodir, int paragraphLevel, bool explicitRTL, bool box_mirror,
   bool dss_isol[count + 1];
   int dss_top = -1;
 
+#ifdef __MINGW32__
+  #define countdss() (dss_top + 1)
+  #define pushdss() do { \
+    dss_top++; \
+    dss_emb[dss_top] = currentEmbedding; \
+    dss_ovr[dss_top] = currentOverride; \
+    dss_isol[dss_top] = currentIsolate; \
+  } while (0)
+  #define popdss() do { \
+    if (dss_top >= 0) dss_top--; \
+    if (dss_top >= 0) { \
+      currentEmbedding = dss_emb[dss_top]; \
+      currentOverride = dss_ovr[dss_top]; \
+      currentIsolate = dss_isol[dss_top]; \
+    } \
+  } while (0)
+#else
   int countdss() { return dss_top + 1; }
 
   void pushdss() {
@@ -732,6 +754,7 @@ do_bidi(bool autodir, int paragraphLevel, bool explicitRTL, bool box_mirror,
       currentIsolate = dss_isol[dss_top];
     }
   }
+#endif
 
   pushdss();
   //int ovfIsolate = 0;
@@ -995,6 +1018,10 @@ do_bidi(bool autodir, int paragraphLevel, bool explicitRTL, bool box_mirror,
 #ifdef consider_BD13
   int isol_run_level;
 #endif
+#ifdef __MINGW32__
+  #define clear_isol() do {} while (0)
+  #define break_isol(j) (!(j))
+#else
   void clear_isol()
   {
 #ifdef consider_BD13
@@ -1041,6 +1068,7 @@ do_bidi(bool autodir, int paragraphLevel, bool explicitRTL, bool box_mirror,
 #endif
     return false;
   }
+#endif  // !__MINGW32__ (break_isol/clear_isol)
 
  /* Rule (W7)
   * W7. Search backwards from each instance of a European number until

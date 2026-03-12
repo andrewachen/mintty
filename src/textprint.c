@@ -2,7 +2,9 @@
 #include "charset.h"
 #include "winpriv.h"  // win_prefix_title, win_unprefix_title
 #include <fcntl.h>
+#ifndef __MINGW32__
 #include <pwd.h>
+#endif
 
 
 static wstring printer = 0;
@@ -10,7 +12,9 @@ static char * pf;
 static int pd;
 static const wchar BOM = 0xFEFF;
 static uint np = 0;
+#ifndef __MINGW32__
 static struct passwd * pw;
+#endif
 
 void
 printer_start_job(wstring printer_name)
@@ -20,6 +24,7 @@ printer_start_job(wstring printer_name)
   char * user = getenv("USER");
   if (!user)
     user = getenv("USERNAME");
+#ifndef __MINGW32__
   if (!user) {
     pw = getpwuid(getuid());
     if (pw)
@@ -27,6 +32,9 @@ printer_start_job(wstring printer_name)
     else
       user = "";
   }
+#endif
+  if (!user)
+    user = "";
 
   char pid[11];
   sprintf(pid, "%d", getpid());

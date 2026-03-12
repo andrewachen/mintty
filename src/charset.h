@@ -1,7 +1,7 @@
 #ifndef CHARSET_H
 #define CHARSET_H
 
-#if CYGWIN_VERSION_DLL_MAJOR >= 1007
+#if CYGWIN_VERSION_DLL_MAJOR >= 1007 && !defined(__MINGW32__)
   #define HAS_LOCALES 1
 #else
   #define HAS_LOCALES 0
@@ -106,7 +106,7 @@ extern int wcscmp(const wchar * s1, const wchar * s2);
 
 #endif
 
-#if CYGWIN_VERSION_API_MINOR < 74 || defined(__midipix__) || defined(debug_wcs)
+#if (CYGWIN_VERSION_API_MINOR < 74 || defined(__midipix__) || defined(debug_wcs)) && !defined(__MINGW32__)
 // needed for MinGW MSYS
 
 #define wcscpy(tgt, src) memcpy(tgt, src, (wcslen(src) + 1) * sizeof(wchar))

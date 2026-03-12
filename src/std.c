@@ -40,7 +40,7 @@ tmpdir()
 }
 
 
-#if CYGWIN_VERSION_API_MINOR < 70
+#if CYGWIN_VERSION_API_MINOR < 70 || defined(__MINGW32__)
 
 int
 vasprintf(char **buf, const char *fmt, va_list va)
@@ -83,14 +83,14 @@ asform(const char *fmt, ...)
 }
 
 
-#if CYGWIN_VERSION_API_MINOR < 74
+#if CYGWIN_VERSION_API_MINOR < 74 && !defined(__MINGW32__)
 int iswalnum(wint_t wc) { return wc < 0x100 && isalnum(wc); }
 int iswalpha(wint_t wc) { return wc < 0x100 && isalpha(wc); }
 int iswspace(wint_t wc) { return wc < 0x100 && isspace(wc); }
 #endif
 
 
-#if CYGWIN_VERSION_API_MINOR < 91
+#if CYGWIN_VERSION_API_MINOR < 91 || defined(__MINGW32__)
 
 /* Copyright (C) 2002 by Red Hat, Incorporated. All rights reserved.
  *
@@ -147,7 +147,7 @@ argz_stringify(char *argz, size_t argz_len, int sep)
 #endif
 
 
-#if CYGWIN_VERSION_API_MINOR < 93 || defined (debug_forkpty)
+#if (CYGWIN_VERSION_API_MINOR < 93 || defined (debug_forkpty)) && !defined(__MINGW32__)
 
 /*-
  * Copyright (c) 1990, 1993

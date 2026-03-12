@@ -338,6 +338,23 @@ typedef enum {
 } mouse_action;  // values are significant, used for calculation!
 
 static void
+encode_coord(char *buf, uint *len, uint c)
+{
+  c += 0x20;
+  if (term.mouse_enc != ME_UTF8)
+    buf[(*len)++] = c < 0x100 ? c : 0;
+  else if (c < 0x80)
+    buf[(*len)++] = c;
+  else if (c < 0x800) {
+    buf[(*len)++] = 0xC0 + (c >> 6);
+    buf[(*len)++] = 0x80 + (c & 0x3F);
+  }
+  else {
+    buf[(*len)++] = 0;
+  }
+}
+
+static void
 send_mouse_event(mouse_action a, mouse_button b, mod_keys mods, pos p)
 {
   if (term.mouse_mode == MM_LOCATOR) {
@@ -421,27 +438,10 @@ send_mouse_event(mouse_action a, mouse_button b, mod_keys mods, pos p)
     char buf[8] = "\e[M";
     uint len = 3;
 
-    void encode_coord(uint c) {
-      c += 0x20;
-      if (term.mouse_enc != ME_UTF8)
-        buf[len++] = c < 0x100 ? c : 0;
-      else if (c < 0x80)
-        buf[len++] = c;
-      else if (c < 0x800) {
-        // In extended mouse mode, positions from 96 to 2015 are encoded as a
-        // two-byte UTF-8 sequence (as introduced in xterm #262.)
-        buf[len++] = 0xC0 + (c >> 6);
-        buf[len++] = 0x80 + (c & 0x3F);
-      }
-      else {
-        // Xterm reports out-of-range positions as a NUL byte.
-        buf[len++] = 0;
-      }
-    }
 
     buf[len++] = code + 0x20;
-    encode_coord(x);
-    encode_coord(y);
+    encode_coord(buf, &len, x);
+    encode_coord(buf, &len, y);
 
     child_write(buf, len);
   }
@@ -677,6 +677,7 @@ term_mouse_release(mouse_button b, mod_keys mods, pos p)
   //printf("term_mouse_release state %d button %d\n", state, b);
 
   // "Clicks place cursor" implementation.
+#ifndef __MINGW32__
   void place_cursor(int mode)
   {
     pos dest;
@@ -743,6 +744,8 @@ term_mouse_release(mouse_button b, mod_keys mods, pos p)
     moved_previously = true;
     last_dest = dest;
   }
+#endif
+
 
   term.mouse_state = 0;
   switch (state) {
@@ -757,8 +760,10 @@ term_mouse_release(mouse_button b, mod_keys mods, pos p)
       term_flush();
 
       // Readline mouse mode: place cursor to mouse position before pasting
+#ifndef __MINGW32__
       if (term.readline_mouse_2)
         place_cursor(2002);
+#endif
 
       // Now the pasting.
       win_paste();
@@ -789,6 +794,7 @@ term_mouse_release(mouse_button b, mod_keys mods, pos p)
 
       // Readline mouse mode: place cursor to mouse position
       // Should cfg.clicks_place_cursor override DECSET mode?
+#ifndef __MINGW32__
       bool extenda = (b == MBT_RIGHT && cfg.right_click_action == RC_EXTEND)
                  || (b == MBT_MIDDLE && cfg.middle_click_action == MC_EXTEND);
       if (term.readline_mouse_1 && b == MBT_LEFT)
@@ -798,6 +804,7 @@ term_mouse_release(mouse_button b, mod_keys mods, pos p)
         place_cursor(2003);
         term.selected = false;
       }
+#endif
     }
     otherwise:
       if (check_app_mouse(&mods)) {

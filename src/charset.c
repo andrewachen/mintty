@@ -14,7 +14,9 @@
 #include <langinfo.h>
 #endif
 
+#ifndef __MINGW32__
 #include <sys/utsname.h>
+#endif
 
 #include <winbase.h>
 #include <winnls.h>
@@ -199,6 +201,7 @@ cs_codepage(string name)
     valid_codepage(cp) ? cp : GetACP();
 }
 
+#ifndef __MINGW32__
 static void
 init_locale_menu(void)
 {
@@ -233,6 +236,7 @@ init_locale_menu(void)
   add_lcid(GetSystemDefaultUILanguage());
   locale_menu[count++] = "C";
 }
+#endif  // !__MINGW32__
 
 static void
 init_charset_menu(void)
@@ -349,10 +353,10 @@ update_mode(void)
   cs_mb1towc(0, 0);
 
   child_update_charset();
-#if CYGWIN_VERSION_API_MINOR >= 66
+#if CYGWIN_VERSION_API_MINOR >= 66 && !defined(__MINGW32__)
   // flag whether we are using UTF-8;
-  // we do not consider NRCS mappings here, 
-  // because GL-mapped characters will be passed transparently 
+  // we do not consider NRCS mappings here,
+  // because GL-mapped characters will be passed transparently
   // and GR-mapped characters are not sent through function cs_mb1towc
   is_utf8 = strcmp(nl_langinfo(CODESET), "UTF-8") == 0;
 #endif
@@ -700,7 +704,9 @@ getlocenvcat(string category)
 void
 cs_init(void)
 {
+#ifndef __MINGW32__
   init_locale_menu();
+#endif
   init_charset_menu();
 
   if (!cfg.old_locale && !getlocenvcat("LC_CTYPE")) {
@@ -1103,7 +1109,7 @@ wcscmp(const wchar * s1, const wchar * s2)
 
 #endif
 
-#if CYGWIN_VERSION_API_MINOR < 74 || defined(__midipix__) || defined(debug_wcs)
+#if (CYGWIN_VERSION_API_MINOR < 74 || defined(__midipix__) || defined(debug_wcs)) && !defined(__MINGW32__)
 // needed for MinGW MSYS
 
 unsigned int
@@ -1296,6 +1302,29 @@ path_posix_to_win_a(const char * p)
 }
 
 # endif
+#elif defined(__MINGW32__)
+
+// On native Windows (MinGW), paths are already in Windows format.
+// These functions do simple encoding conversions without path translation.
+
+char *
+path_win_w_to_posix(const wchar * wp)
+{
+  return cs__wcstombs(wp);
+}
+
+wchar *
+path_posix_to_win_w(const char * p)
+{
+  return cs__mbstowcs(p);
+}
+
+char *
+path_posix_to_win_a(const char * p)
+{
+  return strdup(p);
+}
+
 #else
 
 #warning port to midipix...

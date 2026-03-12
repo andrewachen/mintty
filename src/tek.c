@@ -734,6 +734,19 @@ tek_init(bool reset, int glow)
   }
 }
 
+#ifdef __MINGW32__
+static HPEN
+tek_create_pen_impl(DWORD style, COLORREF _fg, int _pen_width)
+{
+#ifdef use_extpen
+  LOGBRUSH brush = (LOGBRUSH){BS_HOLLOW, _fg, 0};
+  return ExtCreatePen(PS_GEOMETRIC | style, _pen_width, &brush, 0, 0);
+#else
+  return CreatePen(style, _pen_width, _fg);
+#endif
+}
+#endif
+
 void
 tek_paint(void)
 {
@@ -824,6 +837,11 @@ tek_paint(void)
     FillRect(hdc, &(RECT){0, 0, width, height}, bgbr);
   DeleteObject(bgbr);
 
+#ifdef __MINGW32__
+  // MinGW: Clang doesn't support GCC nested functions
+  #define tx(x) (scale_mode ? (x) - 1 : ((x) - 1) * width / 4096)
+  #define ty(y) (scale_mode ? 3119 - ((y) + 2) : (3119 - ((y) + 2)) * height / 4096)
+#else
   int tx(int x) {
     x -= 1;  // heuristic adjustment to compensate for coordinate rounding
     if (scale_mode)
@@ -838,6 +856,7 @@ tek_paint(void)
     else
       return (3119 - y) * height / 4096;
   }
+#endif
 
   XFORM oldxf;
   if (scale_mode == -1 && SetGraphicsMode(hdc, GM_ADVANCED)) {
@@ -951,6 +970,9 @@ tek_paint(void)
     }
     else if (tc->type == TEKMODE_GRAPH) {
       HPEN pen;
+#ifdef __MINGW32__
+      #define create_pen(style) tek_create_pen_impl((style), fg, pen_width)
+#else
       HPEN create_pen(DWORD style)
       {
 #ifdef use_extpen
@@ -960,6 +982,7 @@ tek_paint(void)
         return CreatePen(style, pen_width, fg);
 #endif
       }
+#endif
       //printf("style %d defoc %d pw %d\n", tc->style, tc->defocused, pen_width);
       switch (tc->style) {
         // 1 dotted
@@ -991,6 +1014,9 @@ tek_paint(void)
       Ellipse(hdc, tx(tc->x - delta), ty(tc->y - delta), tx(tc->x + delta), ty(tc->y + delta));
       oldpen = SelectObject(hdc, oldpen);
       DeleteObject(oldpen);
+#ifdef __MINGW32__
+      #undef create_pen
+#endif
     }
     else if (tc->type == TEKMODE_POINT_PLOT || tc->type == TEKMODE_SPECIAL_PLOT) {
       if (tc->intensity == 0x7F && !tc->defocused)

@@ -23,7 +23,7 @@ typedef struct _PROCESSOR_NUMBER {
 #include "config.h"
 
 
-static inline wchar *
+static inline wchar * __attribute__((unused))
 last_error()
 {
   int err = GetLastError();
