@@ -10,7 +10,7 @@
 #include "charset.h"
 #include "child.h"
 #include "winsearch.h"
-#if CYGWIN_VERSION_API_MINOR >= 66
+#if CYGWIN_VERSION_API_MINOR >= 66 && !defined(__MINGW32__)
 #include <langinfo.h>
 #endif
 
@@ -58,7 +58,7 @@ static int linkid = 0;
 int
 putlink(char * link)
 {
-#if CYGWIN_VERSION_API_MINOR >= 66
+#if CYGWIN_VERSION_API_MINOR >= 66 && !defined(__MINGW32__)
   bool utf8 = strcmp(nl_langinfo(CODESET), "UTF-8") == 0;
 #else
   bool utf8 = strstr(cs_get_locale(), ".65001");
@@ -1224,6 +1224,43 @@ printsc(char * tag, char * ltag, termline **lines, int rows)
 /*
  * Line rebreaking for screen and scrollback lines
  */
+#ifdef __MINGW32__
+static bool
+term_advance_inbuf_impl(termline **p_inbuf, int i, int *p_j,
+                        int sblines, int sbpos, uchar **scrollback)
+{
+  termline *inbuf = *p_inbuf;
+  int j = *p_j;
+  if ((inbuf->lattr & LATTR_WRAPPED) && i + j + 1 < sblines) {
+    freeline(inbuf);
+    j++;
+    uchar *cline = scrollback[(i + j + sbpos) % sblines];
+    inbuf = decompressline(cline, null);
+    if (!(inbuf->lattr & LATTR_WRAPCONTD)) {
+      freeline(inbuf);
+      j--;
+      inbuf = 0;
+      *p_inbuf = inbuf;
+      *p_j = j;
+      return false;
+    }
+    else {
+      free(cline);
+      *p_inbuf = inbuf;
+      *p_j = j;
+      return true;
+    }
+  }
+  else {
+    freeline(inbuf);
+    inbuf = 0;
+    *p_inbuf = inbuf;
+    *p_j = j;
+    return false;
+  }
+}
+#endif
+
 static void
 term_reflow(int newrows, int newcols, bool quick_reflow)
 {
@@ -1264,6 +1301,16 @@ term_reflow(int newrows, int newcols, bool quick_reflow)
   term.tempsblines = 0;
 
   int cursor_scrolled = 0;
+#ifdef __MINGW32__
+  #define cursor_scroll(tl) do { \
+    for (int _k = 0; _k < (tl)->cols; _k++) \
+      if ((tl)->chars[_k].attr.attr & TATTR_MARKCURS) { \
+        cursor_scrolled = 0; \
+        break; \
+      } \
+    cursor_scrolled++; \
+  } while(0)
+#else
   void cursor_scroll(termline *tl)
   {
     for (int k = 0; k < tl->cols; k++)
@@ -1273,6 +1320,7 @@ term_reflow(int newrows, int newcols, bool quick_reflow)
       }
     cursor_scrolled ++;
   }
+#endif
 #ifdef debug_reflow
   ulong t1 = mtime();
 #endif
@@ -1382,6 +1430,9 @@ term_reflow(int newrows, int newcols, bool quick_reflow)
     goto wrapped;
 #endif
 
+#ifdef __MINGW32__
+    #define advance_inbuf() term_advance_inbuf_impl(&inbuf, i, &j, sblines, sbpos, scrollback)
+#else
     bool advance_inbuf()
     {
       if ((inbuf->lattr & LATTR_WRAPPED) && i + j + 1 < sblines) {
@@ -1418,6 +1469,7 @@ term_reflow(int newrows, int newcols, bool quick_reflow)
       }
     }
 #endif
+#endif  // close #ifdef wrapbuf
 
     // now do the actual reflow of a wrapped line group
     int incol = -1;
@@ -2191,11 +2243,19 @@ term_do_scroll(int topline, int botline, int lines, bool sb)
   // Reuse lines that are being scrolled out of the scroll region,
   // clearing their content.
   termline *recycled[abs(lines)];
+#ifdef __MINGW32__
+  #define recycle(src) do { \
+    memcpy(recycled, (src), sizeof recycled); \
+    for (int _ri = 0; _ri < lines; _ri++) \
+      clearline(recycled[_ri]); \
+  } while(0)
+#else
   void recycle(termline **src) {
     memcpy(recycled, src, sizeof recycled);
     for (int i = 0; i < lines; i++)
       clearline(recycled[i]);
   }
+#endif
 
   if (down) {
     // Move down remaining lines and push in the recycled lines
@@ -2217,15 +2277,27 @@ term_do_scroll(int topline, int botline, int lines, bool sb)
     }
 
     // Move selection markers if they're within the scroll region
+#ifdef __MINGW32__
+    #define scroll_pos(p) do { \
+      if (!term.show_other_screen && (p)->y >= topline && (p)->y < botline) { \
+        if (((p)->y += lines) >= botline) \
+          *(p) = (pos){.y = botline, .x = 0}; \
+      } \
+    } while(0)
+#else
     void scroll_pos(pos *p) {
       if (!term.show_other_screen && p->y >= topline && p->y < botline) {
         if ((p->y += lines) >= botline)
           *p = (pos){.y = botline, .x = 0};
       }
     }
+#endif
     scroll_pos(&term.sel_start);
     scroll_pos(&term.sel_anchor);
     scroll_pos(&term.sel_end);
+#ifdef __MINGW32__
+    #undef scroll_pos
+#endif
 
     // Move graphics if within the scroll region
     for (imglist * cur = term.imgs.first; cur; cur = cur->next) {
@@ -2258,16 +2330,31 @@ term_do_scroll(int topline, int botline, int lines, bool sb)
     memcpy(bot - lines, recycled, sizeof recycled);
 
     // Move selection markers if they're within the scroll region
+#ifdef __MINGW32__
+    #define scroll_pos(p) do { \
+      if (!term.show_other_screen && (p)->y >= seltop && (p)->y < botline) { \
+        if (((p)->y -= lines) < seltop) \
+          *(p) = (pos){.y = seltop, .x = 0}; \
+      } \
+    } while(0)
+#else
     void scroll_pos(pos *p) {
       if (!term.show_other_screen && p->y >= seltop && p->y < botline) {
         if ((p->y -= lines) < seltop)
           *p = (pos){.y = seltop, .x = 0};
       }
     }
+#endif
     scroll_pos(&term.sel_start);
     scroll_pos(&term.sel_anchor);
     scroll_pos(&term.sel_end);
+#ifdef __MINGW32__
+    #undef scroll_pos
+#endif
   }
+#ifdef __MINGW32__
+  #undef recycle
+#endif
 }
 
 
@@ -2431,7 +2518,7 @@ emoji_tags(int i)
 //	E0XXX	6XXX
 //	1FXXX	5XXX
 #define echar wchar
-#define ee(x) x >= 0xE0000 ? (wchar)((x & 0xFFF) + 0x6000) : x >= 0x1F000 ? (wchar)((x & 0xFFF) + 0x5000) : x
+#define ee(x) (wchar)(x >= 0xE0000 ? (x & 0xFFF) + 0x6000 : x >= 0x1F000 ? (x & 0xFFF) + 0x5000 : x)
 #define ed(x) ((x >> 12) == 6 ? (xchar)x + (0xE0000 - 0x6000) : (x >> 12) == 5 ? (xchar)x + (0x1F000 - 0x5000) : x)
 #else
 #define echar xchar
@@ -3154,6 +3241,180 @@ is_comcom(wchar ch)
   return false;
 }
 
+#ifdef __MINGW32__
+/* File-scope state for tp_flush_text / tp_out_text (extracted from term_paint) */
+#define TP_OVL_MAX 4096
+static wchar tp_ovl_text[TP_OVL_MAX];
+static cattr tp_ovl_textattr[TP_OVL_MAX];
+static int tp_ovl_len;
+static int tp_ovl_x, tp_ovl_y;
+static cattr tp_ovl_attr;
+static ushort tp_ovl_lattr;
+static char tp_ovl_has_rtl, tp_ovl_has_sea;
+
+static bool
+has_comb(termchar * tc)
+{
+  if (!tc->cc_next)
+    return false;
+  if (!is_high_surrogate(tc->chr))
+    return true;
+  tc += tc->cc_next;
+  return tc->cc_next;
+}
+
+static void
+tp_flush_text(void)
+{
+  if (tp_ovl_len) {
+    win_text(tp_ovl_x, tp_ovl_y, tp_ovl_text, tp_ovl_len, tp_ovl_attr, tp_ovl_textattr, tp_ovl_lattr, tp_ovl_has_rtl, tp_ovl_has_sea, false, 2);
+    tp_ovl_len = 0;
+  }
+}
+
+static void
+tp_out_text(bool overlaying, termchar *newchars, int start, bool *do_overlay_p,
+            int x, int y, wchar *text, int len, cattr attr, cattr *textattr,
+            ushort lattr, char has_rtl, char has_sea)
+{
+#ifdef debug_out_text
+      wchar t[len + 1]; wcsncpy(t, text, len); t[len] = 0;
+      for (int i = len - 1; i >= 0 && t[i] == ' '; i--)
+        t[i] = 0;
+      if (*t) {
+        printf("out <%ls>\n", t);
+        for (int i = 0; i < len; i++)
+          printf(" %04X", t[i]);
+        printf("\n");
+      }
+#endif
+      if (attr.attr & TATTR_EMOJI) {
+        // emoji length is encoded in font family
+        int elen = (attr.attr & FONTFAM_MASK) >> ATTR_FONTFAM_SHIFT;
+
+        cattr eattr = attr;
+        eattr.attr &= ~(TATTR_WIDE | TATTR_COMBINING);
+
+        wchar esp[] = W("        ");
+        if (elen) {
+          if (!overlaying) {
+            if (newchars[x].attr.attr & TATTR_SELECTED) {
+              // here we handle background colour once more because
+              // somehow the selection highlighting information from above
+              // got lost in the chaos of chars[], newchars[], attr, tattr...
+              // some substantial revision might be good here, in theory...
+
+              // the main problem here is the reuse of truefg as an 
+              // emoji indicator; we have to make sure truefg isn't 
+              // used anymore for an emoji...
+              eattr.attr |= TATTR_SELECTED;
+              colour bg = eattr.attr & ATTR_REVERSE
+                          ? win_get_colour(SEL_TEXT_COLOUR_I)
+                          : win_get_colour(SEL_COLOUR_I);
+              if (bg == (colour)-1)
+                bg = eattr.attr & ATTR_REVERSE
+                          ? win_get_colour(BG_COLOUR_I)
+                          : win_get_colour(FG_COLOUR_I);
+
+              if (cfg.selection_mode > 1) {
+                if (!term.selection_eq_clipboard)
+                  // dim if selected && not in clipboard
+                  bg = ((bg & 0xFEFEFEFE) >> 1) + ((win_get_colour(BG_COLOUR_I) & 0xFEFEFEFE) >> 1);
+              }
+
+              eattr.truebg = bg;
+              eattr.attr = (eattr.attr & ~ATTR_BGMASK) | (TRUE_COLOUR << ATTR_BGSHIFT);
+              eattr.attr &= ~ATTR_REVERSE;
+            }
+
+            // Emoji overhang
+            if (elen == 1 && attr.attr & TATTR_OVERHANG)
+              elen = 2;
+            // fill emoji background
+            win_text(x, y, esp, elen, eattr, textattr, lattr, has_rtl, has_sea, false, 1);
+            tp_flush_text();
+          }
+#if defined(debug_emojis) && debug_emojis > 4
+          // add background to some emojis
+          eattr.attr &= ~(ATTR_BGMASK | ATTR_FGMASK);
+          eattr.attr |= 6 << ATTR_BGSHIFT | 4;
+          esp[0] = '0' + elen;
+          win_text(x, y, esp, elen, eattr, textattr, lattr, has_rtl, has_sea, false, 2);
+#endif
+          if (cfg.emoji_placement == EMPL_FULL && !overlaying)
+            *do_overlay_p = true;  // display in overlaying loop
+          else {
+            //struct emoji e = (struct emoji) eattr.truefg;
+            struct emoji * ee = (void *)&eattr.truefg;
+            emoji_show(x, y, *ee, elen, eattr, lattr);
+          }
+        }
+#if defined(debug_emojis) && debug_emojis > 4
+        else { // mark some emojis
+          eattr.attr &= ~(ATTR_BGMASK | ATTR_FGMASK);
+          eattr.attr |= 4 << ATTR_BGSHIFT | 6;
+          esp[0] = '0';
+          win_text(x, y, esp, 1, eattr, textattr, lattr, has_rtl, has_sea, false, 2);
+        }
+#endif
+      }
+      else if ((attr.attr & TATTR_OVERHANG) && *text == ' ' //iswspace(*text)
+             // skip the skipping if overhanging char was meanwhile changed
+             && start && (newchars[start - 1].attr.attr & TATTR_OVERHANG)
+              )
+      {
+        // Emoji overhang
+        // do not output adjacent space after overhanging emoji;
+        return;
+      }
+      else if (overlaying) {
+        return;
+      }
+      else if (attr.attr
+          & (ATTR_ITALIC | TATTR_COMBDOUBL | TATTR_OVERHANG | TATTR_MARKCURS)
+        )
+      {
+        /* Split output into 2 phases, for background and foreground, 
+           to support overlay display in some cases:
+           * italics and other potential overhang situations (emojis)
+           * combining doubles
+           * cursor position, to support underlay cursor painting
+         */
+#ifndef phase1_output_after_phase2_copy
+        // phase 1 output for the background
+        win_text(x, y, text, len, attr, textattr, lattr, has_rtl, has_sea, false, 1);
+        tp_flush_text();
+#endif
+
+        // remember actual text for later phase 2 output (flush)
+        // - it used to cause trouble like accent misplacement 
+        // to do this after phase 1 output as win_text could modify contents 
+        // when the combsubst mechanism (wintext) was in effect, now disabled
+        tp_ovl_x = x;
+        tp_ovl_y = y;
+        wcsncpy(tp_ovl_text, text, len);
+        tp_ovl_len = len;
+        tp_ovl_attr = attr;
+        memcpy(tp_ovl_textattr, textattr, len * sizeof(cattr));
+        tp_ovl_lattr = lattr;
+        tp_ovl_has_rtl = has_rtl;
+        tp_ovl_has_sea = has_sea;
+
+#ifdef phase1_output_after_phase2_copy
+        // phase 1 output for the background
+        // - it used to cause overhang clipping (#1304, #1311)
+        // when this was done after phase 2 output copy above
+        win_text(x, y, text, len, attr, textattr, lattr, has_rtl, has_sea, false, 1);
+        tp_flush_text();
+#endif
+      }
+      else {
+        win_text(x, y, text, len, attr, textattr, lattr, has_rtl, has_sea, false, 0);
+        tp_flush_text();
+      }
+}
+#endif
+
 void
 term_paint(void)
 {
@@ -3735,7 +3996,9 @@ term_paint(void)
           || (tchar >= 0x2900 && tchar < 0x2C00)  // Symbols
           || (tchar >= 0xE000 && tchar < 0xF900)  // Private Use
           || (tchar >= 0xDB80 && tchar <= 0xDBFF)  // Private Use
+#ifndef __MINGW32__
           || (tchar >= 0xDB3C && tchar <= 0xD83E)  // Symbols
+#endif
           || indicwide(tchar) || extrawide(tchar)
            )
         {
@@ -4119,6 +4382,7 @@ term_paint(void)
     // (italics and wide glyphs), such chunks are output in two steps;
     // the first output paints the background (and possibly manual underline)
     // and the second output paints the text, over the adjacent chunks
+#ifndef __MINGW32__
     wchar ovl_text[maxtextlen];
     cattr ovl_textattr[maxtextlen];
     int ovl_len = 0;
@@ -4127,7 +4391,11 @@ term_paint(void)
     ushort ovl_lattr;
     char ovl_has_rtl;
     char ovl_has_sea;
+#else
+    tp_ovl_len = 0;
+#endif
 
+#ifndef __MINGW32__
     void flush_text()
     {
       if (ovl_len) {
@@ -4136,6 +4404,7 @@ term_paint(void)
         ovl_len = 0;
       }
     }
+#endif
 
 #define dont_debug_run
 
@@ -4145,6 +4414,7 @@ term_paint(void)
 # define debug_out_text
 #endif
 
+#ifndef __MINGW32__
     void out_text(int x, int y, wchar *text, int len, cattr attr, cattr *textattr, ushort lattr, char has_rtl, char has_sea)
     {
 #ifdef debug_out_text
@@ -4285,6 +4555,13 @@ term_paint(void)
     }
 
     //trace_line("loop3", newchars);
+#else
+    #define flush_text() tp_flush_text()
+    #define out_text(x, y, text, len, attr, textattr, lattr, has_rtl, has_sea) \
+        tp_out_text(overlaying, newchars, start, &do_overlay, \
+                    (x), (y), (text), (len), (attr), (textattr), (lattr), (has_rtl), (has_sea))
+#endif
+
 
    /*
     * Third loop, for actual drawing.
@@ -4335,6 +4612,7 @@ term_paint(void)
       if (tattr.attr & TATTR_EMOJI)
         trace_run("emoji"), break_run = true;
 
+#ifndef __MINGW32__
       inline bool has_comb(termchar * tc)
       {
         if (!tc->cc_next)
@@ -4344,6 +4622,7 @@ term_paint(void)
         tc += tc->cc_next;
         return tc->cc_next;
       }
+#endif
 
      /*
       * Break on both sides of any combined-character cell.
@@ -4590,6 +4869,10 @@ term_paint(void)
       goto overlay;
     }
 
+#ifdef __MINGW32__
+    #undef flush_text
+    #undef out_text
+#endif
    /*
     * Release the line data fetched from the screen or scrollback buffer.
     */

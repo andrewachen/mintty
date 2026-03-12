@@ -78,11 +78,19 @@ else ifeq ($(TARGET), x86_64-pc-msys)
 else ifeq ($(TARGET), Msys-x86_64)
   platform := msys64
   zip_files := ../docs/readme-msys.html
+else ifeq ($(TARGET), Msys-aarch64)
+  platform := clangarm64
+  zip_files := ../docs/readme-msys.html
 else
   # just warning to support cross-generation of data files
 warn=[30;48;5;11m
 norm=[m
   $(warning $(warn) Target '$(TARGET)' not supported $(norm))
+endif
+
+ifeq ($(platform), clangarm64)
+  CC := clang
+  RC := llvm-windres
 endif
 
 CPPFLAGS := -DTARGET=$(TARGET)
@@ -109,12 +117,15 @@ name_ver := $(NAME)-$(srcversion)
 # compilation parameters
 
 c_srcs := $(wildcard *.c)
+ifeq ($(platform), clangarm64)
+  c_srcs := $(filter-out child.c, $(c_srcs)) child_mingw.c
+endif
 rc_srcs := $(wildcard *.rc)
 objs := $(c_srcs:.c=.o) $(rc_srcs:.rc=.o)
 bins := $(patsubst %.o,$(BINDIR)/%.o,$(objs))
 
-ifneq ($(platform), msys)
-  # ensure avoidance of trampolines (a gcc mechanism to implement 
+ifeq ($(filter msys clangarm64, $(platform)),)
+  # ensure avoidance of trampolines (a gcc mechanism to implement
   # some nested functions) as they cause some security software to choke
   SECUR=-Wtrampolines
 endif
@@ -123,8 +134,10 @@ CFLAGS += -std=gnu99 -include std.h -Wall -Wextra -Wundef -Werror
 # verify additional flags that are also injected into pkg build by cygport
 CFLAGS += -Wformat-security
 
+ifneq ($(platform), clangarm64)
 ifeq ($(shell VER=`$(CC) -dumpversion`; expr $${VER%%.*} '>=' 5), 1)
   CFLAGS += -mtune=atom $(SECUR)
+endif
 endif
 
 scriptlib=-lusp10
@@ -136,8 +149,17 @@ ifneq ($(platform), msys)
   scriptlib += -lDWrite
 endif
 extralibs=$(scriptlib) $(downldlib) $(emojilib) -lshlwapi
-LDFLAGS := -L$(shell $(CC) -print-file-name=w32api) -static-libgcc
+ifeq ($(platform), clangarm64)
+  LDFLAGS := -L$(shell $(CC) -print-file-name=w32api)
+else
+  LDFLAGS := -L$(shell $(CC) -print-file-name=w32api) -static-libgcc
+endif
 LDLIBS := -mwindows $(extralibs) -lcomctl32 -limm32 -lwinmm -lwinspool -lole32 -luuid -lmpr
+ifeq ($(platform), clangarm64)
+  LDLIBS += -lws2_32
+endif
+#override LDFLAGS += -L$(shell $(CC) -print-file-name=w32api) -static-libgcc
+#override LDLIBS += -mwindows $(extralibs) -lcomctl32 -limm32 -lwinmm -lwinspool -lole32 -luuid
 
 ifdef DEBUG
 #  CPPFLAGS += -Wno-trampolines
@@ -183,11 +205,20 @@ $(BINDIR)/appinfo.o: appinfo.c appinfo.h appinfo.t
 $(BINDIR)/%.o: %.c
 	$(CC) -c $(DEPOPT) $(CCFLAGS) $(CPPFLAGS) -fstack-check $< -o $(BINDIR)/$*.o
 
+ifeq ($(platform), clangarm64)
+# llvm-windres does not read from stdin; preprocess to a temp file first
+$(BINDIR)/%.o: %.rc %.h %.mft
+	$(CC) -E -xc -DRC_INVOKED $(DEPOPT) $(CPPFLAGS) $< -o $(BINDIR)/$*_pp.rc
+	$(RC) -c 65001 $(BINDIR)/$*_pp.rc $(BINDIR)/$*.o
+	-rm -f $(BINDIR)/$*_pp.rc
+	-mv $*.d $(BINDIR)/
+else
 $(BINDIR)/%.o: %.rc %.h %.mft
 	#$(RC) -c 65001 --preprocessor '$(CC) -E -xc -DRC_INVOKED $(DEPOPT) $(CPPFLAGS)' $< $(BINDIR)/$*.o
 	# broken in binutils 2.36; workaround:
 	$(CC) -E -xc -DRC_INVOKED $(DEPOPT) $(CPPFLAGS) $< | $(RC) -c 65001 -o $(BINDIR)/$*.o
 	-mv $*.d $(BINDIR)/
+endif
 
 gitversion := $(shell ./mkvertag "$(srcversion)")
 

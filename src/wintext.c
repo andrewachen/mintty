@@ -187,6 +187,20 @@ colour_dist(colour a, colour b)
 
 #define dont_debug_brighten
 
+static uint
+brighter_rgb(uint r, uint g, uint b)
+{
+  uint s = min(85, 255 - max(max(r, g), b));
+  return make_colour(r + s, g + s, b + s);
+}
+
+static uint
+darker_rgb(uint r, uint g, uint b)
+{
+  int sub = 70;
+  return make_colour(max(0, (int)r - sub), max(0, (int)g - sub), max(0, (int)b - sub));
+}
+
 colour
 brighten(colour c, colour against, bool monotone)
 {
@@ -198,22 +212,13 @@ brighten(colour c, colour against, bool monotone)
   printf("%s %06X against %06X\n", darken ? "darkening" : "brighting", c, against);
 #endif
 
-  uint _brighter() {
-    uint s = min(85, 255 - max(max(r, g), b));
-    return make_colour(r + s, g + s, b + s);
-  }
-  uint _darker() {
-    int sub = 70;
-    return make_colour(max(0, (int)r - sub), max(0, (int)g - sub), max(0, (int)b - sub));
-  }
-
   colour bright;
   uint thrsh = 22222;  // contrast threshold;
                        // if we're closer to either fg or bg,
                        // turn "brightening" into the other direction
 
   if (darken) {
-    bright = _darker();
+    bright = darker_rgb(r, g, b);
 #ifdef debug_brighten
     printf("darker %06X -> %06X dist %d\n", c, bright, colour_dist(c, bright));
 #endif
@@ -222,14 +227,14 @@ brighten(colour c, colour against, bool monotone)
         uint r = red(bright), g = green(bright), b = blue(bright);
         return make_colour(r - (r >> 2), g - (g >> 2), b - (b >> 2));
       }
-      bright = _brighter();
+      bright = brighter_rgb(r, g, b);
 #ifdef debug_brighten
       printf("   fix %06X -> %06X dist %d/%d\n", c, bright, colour_dist(bright, c), colour_dist(bright, against));
 #endif
     }
   }
   else {
-    bright = _brighter();
+    bright = brighter_rgb(r, g, b);
 #ifdef debug_brighten
     printf("lightr %06X -> %06X dist %d\n", c, bright, colour_dist(c, bright));
 #endif
@@ -238,7 +243,7 @@ brighten(colour c, colour against, bool monotone)
         uint r = red(bright), g = green(bright), b = blue(bright);
         return make_colour(r + ((256 - r) >> 2), g + ((256 - g) >> 2), b + ((256 - b) >> 2));
       }
-      bright = _darker();
+      bright = darker_rgb(r, g, b);
 #ifdef debug_brighten
       printf("   fix %06X -> %06X dist %d/%d\n", c, bright, colour_dist(bright, c), colour_dist(bright, against));
 #endif
@@ -412,7 +417,7 @@ get_default_charset(void)
   CHARSETINFO csi;
 
   long int acp = GetACP();
-  int ok = TranslateCharsetInfo((DWORD *)acp, &csi, TCI_SRCCODEPAGE);
+  int ok = TranslateCharsetInfo((DWORD *)(uintptr_t)acp, &csi, TCI_SRCCODEPAGE);
   if (ok)
     return csi.ciCharset;
   else
@@ -1195,25 +1200,27 @@ static int charnametable_alloced = 0;
 static bool charnametable_init = false;
 
 static void
+add_charname(uint cc, char * cn)
+{
+  if (charnametable_len >= charnametable_alloced) {
+    charnametable_alloced += 999;
+    if (!charnametable)
+      charnametable = newn(struct charnameentry, charnametable_alloced);
+    else
+      charnametable = renewn(charnametable, charnametable_alloced);
+  }
+
+  charnametable[charnametable_len].uc = cc;
+  charnametable[charnametable_len].un = strdup(cn);
+  charnametable_len++;
+}
+
+static void
 init_charnametable()
 {
   if (charnametable_init)
     return;
   charnametable_init = true;
-
-  void add_charname(uint cc, char * cn) {
-    if (charnametable_len >= charnametable_alloced) {
-      charnametable_alloced += 999;
-      if (!charnametable)
-        charnametable = newn(struct charnameentry, charnametable_alloced);
-      else
-        charnametable = renewn(charnametable, charnametable_alloced);
-    }
-
-    charnametable[charnametable_len].uc = cc;
-    charnametable[charnametable_len].un = strdup(cn);
-    charnametable_len++;
-  }
 
   char * cnfn = get_resource_file(W("info"), W("charnames.txt"), false);
   FILE * cnf = 0;
@@ -1485,6 +1492,27 @@ show_status_line()
 #endif
 }
 
+#ifdef __MINGW32__
+static void
+show_char_msg(char * cs)
+{
+  static char * prev = null;
+  char * _cs = cs ?: "";
+  if (!prev || 0 != strcmp(_cs, prev)) {
+    if (nonascii(_cs)) {
+      wchar * wcs = cs__utftowcs(_cs);
+      SetWindowTextW(wnd, wcs);
+      free(wcs);
+    }
+    else
+      SetWindowTextA(wnd, _cs);
+  }
+  if (prev)
+    free(prev);
+  prev = cs;
+}
+#endif
+
 static void
 show_curchar_info(char tag)
 {
@@ -1496,6 +1524,7 @@ show_curchar_info(char tag)
 
   (void)tag;
 
+#ifndef __MINGW32__
   void show_char_msg(char * cs) {
     static char * prev = null;
     char * _cs = cs ?: "";
@@ -1513,6 +1542,7 @@ show_curchar_info(char tag)
       free(prev);
     prev = cs;
   }
+#endif
 
   int line = term.curs.y - term.disptop;
   if (line < 0 || line >= term.rows) {
@@ -1925,9 +1955,14 @@ static int virtual_desktop_top;
 
 #if CYGWIN_VERSION_API_MINOR >= 74
 
+#ifdef __MINGW32__
+#include <gdiplus/gdiplus.h>
+#include <gdiplus/gdiplusflat.h>
+#else
 #include <w32api/wtypes.h>
 #include <w32api/gdiplus/gdiplus.h>
 #include <w32api/gdiplus/gdiplusflat.h>
+#endif
 
 static GpBrush * bgbrush_img = 0;
 static GpGraphics * bg_graphics = 0;
@@ -2439,11 +2474,42 @@ get_bg_filename(void)
   return bgfn;
 }
 
+#ifdef __MINGW32__
+static HDC lbb_dc;
+
+static HBITMAP
+load_background_bitmap(wstring fn)
+{
+  HBITMAP bm = 0;
+  wstring bmpsuf = wcscasestr(fn, W(".bmp"));
+  if (bmpsuf && wcslen(bmpsuf) == 4) {
+    if (tiled)
+      bm = (HBITMAP) LoadImageW(0, fn,
+                                IMAGE_BITMAP, 0, 0,
+                                LR_DEFAULTSIZE |
+                                LR_LOADFROMFILE);
+    else
+      bm = (HBITMAP) LoadImageW(0, fn,
+                                IMAGE_BITMAP, w, h,
+                                LR_LOADFROMFILE);
+  }
+
+  if (bm && alpha >= 0) {
+    if (tiled)
+      bm = alpha_blend_bg(alpha, lbb_dc, bm, 0, 0, win_get_colour(BG_COLOUR_I));
+    else
+      bm = alpha_blend_bg(alpha, lbb_dc, bm, w, h, win_get_colour(BG_COLOUR_I));
+  }
+
+  return bm;
+}
+#endif
+
 static void
 load_background_brush(HDC dc)
 {
-  // we could try to hook into win_adapt_term_size to update the full 
-  // screen background and reload the background on demand, 
+  // we could try to hook into win_adapt_term_size to update the full
+  // screen background and reload the background on demand,
   // but let's rather handle this autonomously here
   RECT cr;
   GetClientRect(wnd, &cr);
@@ -2466,6 +2532,10 @@ load_background_brush(HDC dc)
 
   wchar * bgfn = get_bg_filename();  // also set tiled and alpha
 
+#ifdef __MINGW32__
+  lbb_dc = dc;
+#endif
+#ifndef __MINGW32__
   HBITMAP
   load_background_bitmap(wstring fn)
   {
@@ -2492,6 +2562,7 @@ load_background_brush(HDC dc)
 
     return bm;
   }
+#endif
 
   if (!bgbrush_bmp) {
     HBITMAP bm = load_background_bitmap(bgfn);
@@ -3084,6 +3155,358 @@ apply_attr_colour(cattr a, attr_colour_mode mode)
   return a;
 }
 
+#ifdef __MINGW32__
+/* File-scope state for win_text nested function replacements. */
+struct wt_ctx {
+  bool underlaid;
+  HDC dc;
+  colour fg, bg;
+  RECT box;
+  int layer;
+  HRGN clipr;
+  int cell_height_v, cell_width_v;
+  ushort lattr_v;
+  int ty_v;
+  int char_width_v, char_height_v;
+  int xi, y0;
+  int line_width_v;
+  HPEN pen, heavypen, roundpen;
+  HBRUSH boxbr;
+  int penwidth, heavypenwidth;
+};
+static struct wt_ctx wt;
+
+static void
+wt_clear_run(void)
+{
+  if (!wt.underlaid) {
+    HBRUSH bgb = CreateSolidBrush(wt.bg);
+    FillRect(wt.dc, &wt.box, bgb);
+    DeleteObject(bgb);
+    wt.underlaid = true;
+  }
+}
+
+static void
+wt_setclipr(int x, int y, int n)
+{
+  int clip_height = wt.cell_height_v
+                    * (wt.lattr_v >= LATTR_TOP && wt.ty_v < term_allrows - 1 ? 2 : 1);
+  wt.clipr = CreateRectRgn(x, y, x + n * wt.char_width_v, y + clip_height);
+  SelectClipRgn(wt.dc, wt.clipr);
+}
+
+static void
+wt_clearclipr(void)
+{
+  SelectClipRgn(wt.dc, 0);
+  DeleteObject(wt.clipr);
+}
+
+static colour
+wt_colmix(char mix)
+{
+  uint r = (red(wt.fg) * mix + red(wt.bg) * (8 - mix)) / 8;
+  uint g = (green(wt.fg) * mix + green(wt.bg) * (8 - mix)) / 8;
+  uint b = (blue(wt.fg) * mix + blue(wt.bg) * (8 - mix)) / 8;
+  colour res = RGB(r, g, b);
+  if (wt.layer)
+    res = ((res & 0xFEFEFEFE) >> 1) + ((win_get_colour(BG_COLOUR_I) & 0xFEFEFEFE) >> 1);
+  return res;
+}
+
+static void
+wt_linedraw(char l, char t, char r, char b, colour c)
+{
+  HPEN oldpen = SelectObject(wt.dc, CreatePen(PS_SOLID, 0, c));
+  MoveToEx(wt.dc, wt.xi + l, wt.y0 + t, null);
+  LineTo(wt.dc, wt.xi + r, wt.y0 + b);
+  DeleteObject(SelectObject(wt.dc, oldpen));
+}
+
+static void
+wt_lines(char x1, char y1, char x2, char y2, char x3, char y3)
+{
+  int _x1 = wt.char_width_v * x1 / 8;
+  int _y1 = wt.char_height_v * y1 / 8;
+  int _x2 = wt.char_width_v * x2 / 8;
+  int _y2 = wt.char_height_v * y2 / 8;
+  int _x3 = wt.char_width_v * x3 / 8;
+  int _y3 = wt.char_height_v * y3 / 8;
+  if (x2) {
+    _x1--; _x2--; _x3--;
+  }
+  int w = y3 >= 0 ? wt.line_width_v : 0;
+  HPEN oldpen = SelectObject(wt.dc, CreatePen(PS_SOLID, w, wt.fg));
+  MoveToEx(wt.dc, wt.xi + _x1, wt.y0 + _y1, null);
+  LineTo(wt.dc, wt.xi + _x2, wt.y0 + _y2);
+  if (y3 >= 0) {
+    MoveToEx(wt.dc, wt.xi + _x3, wt.y0 + _y3 - 1, null);
+    LineTo(wt.dc, wt.xi + _x2, wt.y0 + _y2 - 1);
+  }
+  DeleteObject(SelectObject(wt.dc, oldpen));
+}
+
+static void
+wt_trio(char x1, char y1, char x2, char y2, char x3, char y3, bool chord)
+{
+  bool lefthalf = x1;
+  if (chord && lefthalf) {
+    x1++; x2++; x3++;
+  }
+  int _x1 = wt.char_width_v * x1 / 8;
+  int _y1 = wt.char_height_v * y1 / 8;
+  int _x2 = wt.char_width_v * x2 / 8;
+  int _y2 = wt.char_height_v * y2 / 8;
+  int _x3 = wt.char_width_v * x3 / 8;
+  int _y3 = wt.char_height_v * y3 / 8;
+
+  HPEN oldpen = SelectObject(wt.dc, CreatePen(PS_SOLID, 0, wt.fg));
+  HBRUSH oldbrush = SelectObject(wt.dc, CreateSolidBrush(wt.fg));
+  if (chord) {
+    if (lefthalf)
+      Chord(wt.dc, wt.xi      , wt.y0 + _y1, wt.xi + 2 * _x1, wt.y0 + _y3,
+                   wt.xi + _x1, wt.y0 + _y1, wt.xi + _x3    , wt.y0 + _y3);
+    else
+      Chord(wt.dc, wt.xi - _x2, wt.y0 + _y1, wt.xi + _x2, wt.y0 + _y3,
+                   wt.xi + _x3, wt.y0 + _y3, wt.xi + _x1, wt.y0 + _y1);
+  }
+  else
+    Polygon(wt.dc, (POINT[]){{wt.xi + _x1, wt.y0 + _y1},
+                              {wt.xi + _x2, wt.y0 + _y2},
+                              {wt.xi + _x3, wt.y0 + _y3}}, 3);
+  DeleteObject(SelectObject(wt.dc, oldbrush));
+  DeleteObject(SelectObject(wt.dc, oldpen));
+}
+
+static void
+wt_triangle(char x1, char y1, char x2, char y2, char x3, char y3)
+{
+  wt_trio(x1, y1, x2, y2, x3, y3, false);
+}
+
+static void
+wt_trichord(char x1, char y1, char x2, char y2, char x3, char y3)
+{
+  wt_trio(x1, y1, x2, y2, x3, y3, true);
+}
+
+static void
+wt_rectdraw(char l, char t, char r, char b, char sol, colour c)
+{
+  int cl = wt.char_width_v * l;
+  int ct = wt.char_height_v * t;
+  int cr = wt.char_width_v * r;
+  int cb = wt.char_height_v * b;
+  int dl = cl % 8;
+  int dt = ct % 8;
+  int dr = cr % 8;
+  int db = cb % 8;
+  cl /= 8;
+  ct /= 8;
+  cr /= 8;
+  cb /= 8;
+  int cl_ = cl;
+  int ct_ = ct;
+  int cr_ = cr;
+  int cb_ = cb;
+  if (dl) {
+    if (sol & 0x1)
+      dl = 0;
+    else
+      cl_++;
+  }
+  if (dt) {
+    if (sol & 0x8)
+      dt = 0;
+    else
+      ct_++;
+  }
+  if (dr) {
+    if (sol & 0x4) {
+      dr = 0;
+      cr_++;
+    }
+  }
+  if (db) {
+    if (sol & 0x2) {
+      db = 0;
+      cb_++;
+    }
+  }
+  HBRUSH br = CreateSolidBrush(c);
+  FillRect(wt.dc, &(RECT){wt.xi + cl_, wt.y0 + ct_, wt.xi + cr_, wt.y0 + cb_}, br);
+  DeleteObject(br);
+  if (dl)
+    wt_linedraw(cl, ct, cl, cb, wt_colmix(8 - dl));
+  if (dt)
+    wt_linedraw(cl, ct, cr, ct, wt_colmix(8 - dt));
+  if (dr)
+    wt_linedraw(cr, ct, cr, cb, wt_colmix(dr));
+  if (db)
+    wt_linedraw(cl, cb, cr, cb, wt_colmix(db));
+}
+
+static void
+wt_rect(char l, char t, char r, char b)
+{
+  wt_rectdraw(l, t, r, b, 0, wt.fg);
+}
+
+static void
+wt_rectsolcol(char l, char t, char r, char b, char mix)
+{
+  wt_rectdraw(l, t, r, b, 0xF, wt_colmix(mix));
+}
+
+static void
+wt_rectsolid(char l, char t, char r, char b, char sol)
+{
+  wt_rectdraw(l, t, r, b, sol, wt.fg);
+}
+
+static int
+wt_boxscale(int ref, char val, char y3)
+{
+#define dl 0x50
+#define dh 0x51
+  if (val >= dl) {
+    if (val > dl)
+      return ref / 2 + wt.line_width_v;
+    else
+      return ref / 2 - wt.line_width_v;
+  }
+  else if (y3 < -3) {
+    return ref * val / 72;
+  }
+  else {
+    return ref * val / 24;
+  }
+#undef dl
+#undef dh
+}
+
+static void
+wt_boxline(int x1, int y1, int x2, int y2,
+           bool heavy, char y3,
+           int penwidth, int heavypenwidth)
+{
+  if (y3 < -2) {
+    int w = penwidth;
+    if (heavy)
+      w = heavypenwidth;
+    if (x1 > x2) {
+      x1 ^= x2; x2 ^= x1; x1 ^= x2;
+    }
+    if (y1 > y2) {
+      y1 ^= y2; y2 ^= y1; y1 ^= y2;
+    }
+    if (x1 == x2) {
+      x1 -= w / 2;
+      x2 += w - w / 2;
+    }
+    if (y1 == y2) {
+      y1 -= w / 2;
+      y2 += w - w / 2;
+    }
+    FillRect(wt.dc, &(RECT){wt.xi + x1, wt.y0 + y1, wt.xi + x2, wt.y0 + y2}, wt.boxbr);
+  }
+  else {
+    y1 += wt.y0;
+    y2 += wt.y0;
+    x1 += wt.xi;
+    x2 += wt.xi;
+    if (heavy)
+      SelectObject(wt.dc, wt.heavypen);
+    if (y3 == -2) {
+      y2 -= max(penwidth / 3, 1);
+      x2 -= max(penwidth / 3, 1);
+      SelectObject(wt.dc, wt.roundpen);
+    }
+    MoveToEx(wt.dc, x1, y1, null);
+    LineTo(wt.dc, x2, y2);
+    if (y3 > -3)
+      LineTo(wt.dc, x1, y1);
+    if (heavy || y3 == -2)
+      SelectObject(wt.dc, wt.pen);
+  }
+}
+
+static void
+wt_boxlines(bool heavy, char x1, char y1, char x2, char y2, char x3, char y3)
+{
+  int _x1 = wt_boxscale(wt.char_width_v, x1, y3);
+  int _y1 = wt_boxscale(wt.char_height_v, y1, y3);
+  int _x2 = wt_boxscale(wt.char_width_v, x2, y3);
+  int _y2 = wt_boxscale(wt.char_height_v, y2, y3);
+  int _x3 = wt_boxscale(wt.char_width_v, x3, y3);
+  int _y3 = wt_boxscale(wt.char_height_v, y3, y3);
+
+  wt_boxline(_x1, _y1, _x2, _y2, heavy, y3, wt.penwidth, wt.heavypenwidth);
+  if (y3 >= 0)
+    wt_boxline(_x2, _y2, _x3, _y3, heavy, y3, wt.penwidth, wt.heavypenwidth);
+}
+
+static void
+wt_boxcurve(char q)
+{
+  int x1, y1, x2, y2, xc, yc, a;
+  int r = wt.char_width_v / 2 + 1;
+  switch (q) {
+    when 1:
+      x1 = wt.char_width_v / 2;
+      y1 = 0;
+      x2 = wt.char_width_v + 1;
+      y2 = wt.char_height_v / 2;
+      xc = wt.char_width_v / 2 + r;
+      yc = wt.char_height_v / 2 - r;
+      a = 180;
+    when 2:
+      x1 = wt.char_width_v;
+      y1 = wt.char_height_v / 2;
+      x2 = wt.char_width_v / 2;
+      y2 = wt.char_height_v + 1;
+      xc = wt.char_width_v / 2 + r;
+      yc = wt.char_height_v / 2 + r;
+      a = 90;
+    when 3:
+      x1 = wt.char_width_v / 2;
+      y1 = wt.char_height_v;
+      x2 = -1;
+      y2 = wt.char_height_v / 2;
+      xc = wt.char_width_v / 2 - r;
+      yc = wt.char_height_v / 2 + r;
+      a = 0;
+    when 4:
+      x1 = 0;
+      y1 = wt.char_height_v / 2;
+      x2 = wt.char_width_v / 2;
+      y2 = -1;
+      xc = wt.char_width_v / 2 - r;
+      yc = wt.char_height_v / 2 - r;
+      a = 270;
+  }
+  MoveToEx(wt.dc, wt.xi + x1, wt.y0 + y1, null);
+  AngleArc(wt.dc, wt.xi + xc, wt.y0 + yc, r, a, 90);
+  LineTo(wt.dc, wt.xi + x2, wt.y0 + y2);
+}
+
+static int
+wt_cursor_size(int cell_size)
+{
+  switch (term.cursor_size) {
+    when 1: return -2;
+    when 2: return wt.line_width_v - 1;
+    when 3: return cell_size / 3 - 1;
+    when 4: return cell_size / 2;
+    when 5: return cell_size * 2 / 3;
+    when 6: return cell_size - 2;
+    otherwise: return 0;
+  }
+}
+
+#endif  /* __MINGW32__ */
+
 /*
  * Draw a line of text in the window, at given character
  * coordinates, in given attributes.
@@ -3558,6 +3981,7 @@ win_text(int tx, int ty, wchar *text, int len, cattr attr, cattr *textattr, usho
   }
 #endif
 
+#ifndef __MINGW32__
   bool underlaid = false;
   void clear_run() {
     if (!underlaid) {
@@ -3569,6 +3993,20 @@ win_text(int tx, int ty, wchar *text, int len, cattr attr, cattr *textattr, usho
       underlaid = true;
     }
   }
+#endif
+#ifdef __MINGW32__
+  wt.underlaid = false;
+  wt.dc = dc;
+  wt.bg = bg;
+  wt.box = box;
+  wt.cell_height_v = cell_height;
+  wt.char_width_v = char_width;
+  wt.lattr_v = lattr;
+  wt.ty_v = ty;
+  wt.line_width_v = line_width;
+# define underlaid wt.underlaid
+# define clear_run() wt_clear_run()
+#endif
 
  /* Graphic background: picture or texture */
   if (*cfg.background && default_bg) {
@@ -4043,10 +4481,11 @@ skip_drawing:;
 #define DRAW_DOWN  0x4
 #endif
 
+#ifndef __MINGW32__
   HRGN clipr;
   void setclipr(int x, int y, int n)
   {
-    int clip_height = cell_height 
+    int clip_height = cell_height
                       * (lattr >= LATTR_TOP && ty < term_allrows - 1 ? 2 : 1);
     clipr = CreateRectRgn(x, y, x + n * char_width, y + clip_height);
     SelectClipRgn(dc, clipr);
@@ -4056,6 +4495,11 @@ skip_drawing:;
     SelectClipRgn(dc, 0);
     DeleteObject(clipr);
   }
+#endif
+#ifdef __MINGW32__
+# define setclipr(xx, yy, nn) wt_setclipr((xx), (yy), (nn))
+# define clearclipr()         wt_clearclipr()
+#endif
 
   if (vt52fraction) {  // draw VT52 fraction numerators
     setclipr(x, y, ulen);
@@ -4097,10 +4541,39 @@ skip_drawing:;
       y0 -= cell_height;
     int xi = x;
     //printf("@%d/%d char %d×%d cell %d×%d\n", x, y, char_width, char_height, cell_width, cell_height);
+#ifdef __MINGW32__
+    wt.fg = fg;
+    wt.bg = bg;
+    wt.layer = layer;
+    wt.xi = xi;
+    wt.y0 = y0;
+    wt.char_height_v = char_height;
+# define colmix(m)               wt_colmix(m)
+# define linedraw(l, t, r, b, c) wt_linedraw((l), (t), (r), (b), (c))
+# define lines(x1, y1, x2, y2, x3, y3) \
+                                 wt_lines((x1), (y1), (x2), (y2), (x3), (y3))
+# define trio(x1, y1, x2, y2, x3, y3, chord) \
+                                 wt_trio((x1), (y1), (x2), (y2), (x3), (y3), (chord))
+# define triangle(x1, y1, x2, y2, x3, y3) \
+                                 wt_triangle((x1), (y1), (x2), (y2), (x3), (y3))
+# define trichord(x1, y1, x2, y2, x3, y3) \
+                                 wt_trichord((x1), (y1), (x2), (y2), (x3), (y3))
+# define rectdraw(l, t, r, b, sol, c) \
+                                 wt_rectdraw((l), (t), (r), (b), (sol), (c))
+# define rect(l, t, r, b)        wt_rect((l), (t), (r), (b))
+# define rectsolcol(l, t, r, b, mix) \
+                                 wt_rectsolcol((l), (t), (r), (b), (mix))
+# define rectsolid(l, t, r, b, sol) \
+                                 wt_rectsolid((l), (t), (r), (b), (sol))
+# define boxlines(heavy, x1, y1, x2, y2, x3, y3) \
+                                 wt_boxlines((heavy), (x1), (y1), (x2), (y2), (x3), (y3))
+# define boxcurve(q)             wt_boxcurve(q)
+#endif
 
     /*
        Mix fg at mix/8 with bg.
      */
+#ifndef __MINGW32__
     colour colmix(char mix)
     {
       uint r = (red(fg) * mix + red(bg) * (8 - mix)) / 8;
@@ -4252,6 +4725,7 @@ skip_drawing:;
     {
       rectdraw(l, t, r, b, sol, fg);
     }
+#endif  /* __MINGW32__ */
 
     // prepare Box Drawing resources
     int penwidth = line_width;
@@ -4270,6 +4744,7 @@ skip_drawing:;
     HBRUSH br = CreateSolidBrush(fg);
     // save pen and preload default pen for some performance
     HPEN oldpen = SelectObject(dc, pen);
+#ifndef __MINGW32__
     HPEN curpen = pen;
 
     // set pen on demand
@@ -4280,10 +4755,21 @@ skip_drawing:;
         curpen = newpen;
       }
     }
+#endif
+#ifdef __MINGW32__
+    wt.pen = pen;
+    wt.heavypen = heavypen;
+    wt.roundpen = roundpen;
+    wt.boxbr = br;
+    wt.penwidth = penwidth;
+    wt.heavypenwidth = heavypenwidth;
+# define setpen(newpen) SelectObject(dc, (newpen))
+#endif
 
 #define dl 0x50
 #define dh 0x51
 
+#ifndef __MINGW32__
     void boxlines(bool heavy, char x1, char y1, char x2, char y2, char x3, char y3)
     {
       int boxscale(int ref, char val)
@@ -4424,10 +4910,14 @@ skip_drawing:;
       AngleArc(dc, xi + xc, y0 + yc, r, a, 90);
       LineTo(dc, xi + x2, y0 + y2);
     }
+#endif  /* __MINGW32__ */
 
     setclipr(xi, yclip, len);
     for (int i = 0; i < len; i++) {
-      //setclipr(xi, yclip, 1);
+#ifdef __MINGW32__
+      wt.xi = xi;
+#endif
+      setclipr(xi, yclip, 1);
 
       switch (origtext[i]) {
         // Box Drawing (U+2500-U+257F)
@@ -4550,6 +5040,20 @@ skip_drawing:;
     DeleteObject(heavypen);
     DeleteObject(br);
   }
+#ifdef __MINGW32__
+# undef colmix
+# undef linedraw
+# undef lines
+# undef trio
+# undef triangle
+# undef trichord
+# undef rectdraw
+# undef rect
+# undef rectsolcol
+# undef rectsolid
+# undef boxlines
+# undef boxcurve
+#endif
   else if (boxcoded && origtext) {  // VT100/VT52 box drawing and scanlines
     HPEN oldpen = SelectObject(dc, CreatePen(PS_SOLID, 0, fg));
 
@@ -4657,6 +5161,7 @@ skip_drawing:;
   show_curchar_info('w');
 
   if (has_cursor && phase < 2) {
+#ifndef __MINGW32__
     int cursor_size(int cell_size)
     {
       switch (term.cursor_size) {
@@ -4669,6 +5174,10 @@ skip_drawing:;
         otherwise: return 0;              // default
       }
     }
+#endif
+#ifdef __MINGW32__
+#   define cursor_size(cs) wt_cursor_size(cs)
+#endif
 
     colour _cc = cursor_colour;
     if (layer)
@@ -4801,6 +5310,13 @@ skip_drawing:;
 
   if (coord_transformed)
     SetWorldTransform(dc, &old_xform);
+#ifdef __MINGW32__
+# undef underlaid
+# undef clear_run
+# undef setclipr
+# undef clearclipr
+# undef cursor_size
+#endif
 }
 
 
@@ -5141,6 +5657,7 @@ win_char_width(xchar c, cattrflags attr)
 
 #define dont_debug_rendering
 
+#ifndef __MINGW32__
   int act_char_width(xchar wc)
   {
 # ifdef debug_rendering
@@ -5282,6 +5799,7 @@ win_char_width(xchar c, cattrflags attr)
 
     return wid;
   }
+#endif  /* !__MINGW32__ (act_char_width nested function) */
 
   if ((c >= 0x2160 && c <= 0x2179)   // Roman Numerals
      )
@@ -5352,9 +5870,13 @@ win_char_width(xchar c, cattrflags attr)
         }
       }
 
+#ifndef __MINGW32__
     int mbuf = act_char_width(c);
     // report char as wide if its measured width is more than 1½ cells
     int width = mbuf > cell_width ? 2 : 1;
+#else
+    int width = 1;  // act_char_width not available without GCC nested functions
+#endif
     ReleaseDC(wnd, dc);
 # ifdef debug_win_char_width
     if (c > '~' || c == 'A') {
@@ -5427,6 +5949,17 @@ win_combine_chars(wchar c, wchar cc, cattrflags attr)
 // Xterm256 colour cube and greyscale
 static colour xterm_colours[240];
 
+#ifdef __MINGW32__
+static void
+set_colour(colour_i i, colour c, bool * changed)
+{
+  if (c != colours[i]) {
+    colours[i] = c;
+    *changed = true;
+  }
+}
+#endif
+
 void
 win_set_colour(colour_i i, colour c)
 {
@@ -5436,6 +5969,7 @@ win_set_colour(colour_i i, colour c)
   static bool bold_colour_selected = false;
 
   bool changed_something = false;
+#ifndef __MINGW32__
   void cc(colour_i i, colour c)
   {
     if (c != colours[i]) {
@@ -5443,6 +5977,10 @@ win_set_colour(colour_i i, colour c)
       changed_something = true;
     }
   }
+#endif
+#ifdef __MINGW32__
+# define cc(ii, cc_c) set_colour((ii), (cc_c), &changed_something)
+#endif
 
   if (c == (colour)-1) {
     // ... reset to default ...
@@ -5555,6 +6093,9 @@ win_set_colour(colour_i i, colour c)
   // Redraw everything.
   if (changed_something)
     win_invalidate_all(false);
+#ifdef __MINGW32__
+# undef cc
+#endif
 }
 
 colour

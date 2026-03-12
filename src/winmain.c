@@ -31,9 +31,13 @@ char * mintty_debug;
 #define getopt_long_only getopt_long
 typedef UINT_PTR uintptr_t;
 #endif
+#ifndef __MINGW32__
 #include <pwd.h>
+#endif
 
+#if !defined(__MINGW32__) || __has_include(<dlfcn.h>)
 #include <dlfcn.h>
+#endif
 #include <math.h>
 
 #include <mmsystem.h>  // PlaySound for MSys
@@ -52,7 +56,9 @@ typedef UINT_PTR uintptr_t;
 
 #include <sys/stat.h>
 #include <fcntl.h>  // open flags
+#ifndef __MINGW32__
 #include <sys/utsname.h>
+#endif
 #include <dirent.h>
 
 
@@ -320,6 +326,34 @@ is_win_dark_mode(void)
 }
 
 
+#ifdef __MINGW32__
+static char *
+wslpath_(char * path)
+{
+  char * wslcmd;
+  if (*path == '~')
+    wslcmd = asform("wsl -d %ls sh -c 'wslpath -m ~ 2>/dev/null'", wslname);
+  else
+    wslcmd = asform("wsl -d %ls sh -c 'wslpath -m \"%s\" 2>/dev/null'", wslname, path);
+  FILE * wslpopen = popen(wslcmd, "r");
+  char line[MAX_PATH + 1];
+  char * got = fgets(line, sizeof line, wslpopen);
+  pclose(wslpopen);
+  free(wslcmd);
+  if (!got)
+    return 0;
+  int len = strlen(line);
+  if (line[len - 1] == '\n')
+    line[len - 1] = 0;
+  if (*line)
+    return strdup(line);
+  else
+    return 0;
+}
+#define wslpath(p) wslpath_(p)
+#endif  /* __MINGW32__: wslpath_ */
+
+// WSL path conversion, using wsl.exe
 /*
    Capture output of cmd, using Windows CreateProcess
    - variants with Posix functions work
@@ -396,6 +430,7 @@ cmd_out_capture_start_process(char * cmd)
 char *
 wslwinpath(string path)
 {
+#ifndef __MINGW32__
   char * wslpath(char * path)
   {
     char * wslcmd;
@@ -450,6 +485,7 @@ wslwinpath(string path)
     else
       return 0;
   }
+#endif
 
   trace_guard(("wslwinpath %s\n", path));
   if (0 == strcmp("~", path))
@@ -490,6 +526,25 @@ wslwinpath(string path)
     return winpath;
   }
 }
+
+#ifdef __MINGW32__
+static void
+unguard_(char * env, bool * guard, wchar * wpath, int plen)
+{
+  if (env) {
+    wchar * prepath = path_posix_to_win_w(env);
+    if (prepath && *prepath) {
+      int envlen = wcslen(prepath);
+      if (0 == wcsncmp(prepath, wpath, envlen))
+        if (prepath[envlen - 1] == '\\' ||
+            plen <= envlen || wpath[envlen] == '\\')
+          *guard = false;
+    }
+    if (prepath)
+      free(prepath);
+  }
+}
+#endif  /* __MINGW32__: unguard_ */
 
 // Safeguard checking path to guard against unexpected network access
 char *
@@ -565,6 +620,7 @@ guardpath(string path, int level)
 
   // ... but do not guard if it is in $HOME or $APPDATA
   if (guard) {
+#ifndef __MINGW32__
     void unguard(char * env) {
       if (env) {
         wchar * prepath = path_posix_to_win_w(env);
@@ -584,6 +640,9 @@ guardpath(string path, int level)
         trace_guard(("         null\n"));
       }
     }
+#else
+    #define unguard(env) unguard_(env, &guard, wpath, plen)
+#endif  /* !__MINGW32__: unguard */
     unguard(getenv("APPDATA"));
     if (support_wsl) {
       //char * rootdir = path_win_w_to_posix(wsl_basepath);
@@ -620,6 +679,7 @@ guardpath(string path, int level)
         // if tcgetpgrp / foreground_pid() / foreground_cwd() fails,
         // check for processes $p where /proc/$p/ctty is child_tty()
         // whether the checked filename is below their /proc/$p/cwd
+#ifndef __MINGW32__
         DIR * d = opendir("/proc");
         if (d) {
           char * tty = child_tty();
@@ -647,9 +707,13 @@ guardpath(string path, int level)
           }
           closedir(d);
         }
+#endif
       }
     }
   }
+#ifdef __MINGW32__
+  #undef unguard
+#endif
   delete(wpath);
 
   trace_guard(("   -> %d -> <%s>\n", guard, expath));
@@ -938,9 +1002,23 @@ add_tabinfo(unsigned long tag, HWND wnd, wchar * title)
   }
 }
 
+#ifdef __MINGW32__
+static int
+comp_tabinfo(const void * t1, const void * t2)
+{
+  if (((struct tabinfo *)t1)->tag < ((struct tabinfo *)t2)->tag)
+    return -1;
+  if (((struct tabinfo *)t1)->tag > ((struct tabinfo *)t2)->tag)
+    return 1;
+  else
+    return 0;
+}
+#endif  /* __MINGW32__: comp_tabinfo */
+
 static void
 sort_tabinfo()
 {
+#ifndef __MINGW32__
   int comp_tabinfo(const void * t1, const void * t2)
   {
     if (((struct tabinfo *)t1)->tag < ((struct tabinfo *)t2)->tag)
@@ -950,13 +1028,42 @@ sort_tabinfo()
     else
       return 0;
   }
+#endif
   qsort(tabinfo, ntabinfo, sizeof(struct tabinfo), comp_tabinfo);
 }
+
+#ifdef __MINGW32__
+static BOOL CALLBACK
+wnd_hide_tab(HWND curr_wnd, LPARAM lp)
+{
+  HWND to_top = (HWND)lp;
+  WINDOWINFO curr_wnd_info;
+  curr_wnd_info.cbSize = sizeof(WINDOWINFO);
+  GetWindowInfo(curr_wnd, &curr_wnd_info);
+  if (class_atom == curr_wnd_info.atomWindowType) {
+    if (curr_wnd != to_top && !IsIconic(curr_wnd)) {
+#ifdef debug_hiding
+      int len = GetWindowTextLengthW(curr_wnd);
+      wchar t[len + 1];
+      GetWindowTextW(curr_wnd, t, len + 1);
+      printf("hiding <%ls>\n", t);
+#endif
+      LONG style = GetWindowLong(curr_wnd, GWL_EXSTYLE);
+      style |= WS_EX_LAYERED;
+      style |= WS_EX_TOOLWINDOW;
+      SetWindowLong(curr_wnd, GWL_EXSTYLE, style);
+      SetLayeredWindowAttributes(curr_wnd, 0, 0, LWA_ALPHA);
+    }
+  }
+  return true;
+}
+#endif  /* __MINGW32__: wnd_hide_tab */
 
 static void
 win_hide_other_tabs(HWND to_top)
 {
   //printf("[%p] win_hide_other_tabs\n", wnd);
+#ifndef __MINGW32__
   BOOL CALLBACK wnd_hide_tab(HWND curr_wnd, LPARAM lp)
   {
     HWND to_top = (HWND)lp;
@@ -992,6 +1099,7 @@ win_hide_other_tabs(HWND to_top)
     }
     return true;
   }
+#endif  /* !__MINGW32__: wnd_hide_tab */
 
   EnumWindows(wnd_hide_tab, (LPARAM)to_top);
 }
@@ -1091,9 +1199,36 @@ strip_title(wchar * title)
   ///TODO: Maintain a local list of them.
   To be used for tab bar display.
  */
+#ifdef __MINGW32__
+static BOOL CALLBACK
+wnd_enum_tabs_refresh(HWND curr_wnd, LPARAM lp)
+{
+  bool trace = (bool)lp;
+  (void)trace;
+  WINDOWINFO curr_wnd_info;
+  curr_wnd_info.cbSize = sizeof(WINDOWINFO);
+  GetWindowInfo(curr_wnd, &curr_wnd_info);
+  if (class_atom == curr_wnd_info.atomWindowType) {
+    int len = GetWindowTextLengthW(curr_wnd);
+    if (!len) {
+      LONG fini = GetWindowLong(curr_wnd, GWL_USERDATA) & 1;
+      if (fini)
+        return true;
+    }
+    wchar title[len + 1];
+    GetWindowTextW(curr_wnd, title, len + 1);
+    strip_title(title);
+    LONG crtime = GetWindowLong(curr_wnd, GWL_USERDATA) & GWL_TIMEMASK;
+    add_tabinfo(crtime, curr_wnd, title);
+  }
+  return true;
+}
+#endif  /* __MINGW32__: wnd_enum_tabs_refresh */
+
 static void
 refresh_tabinfo(bool trace)
 {
+#ifndef __MINGW32__
   BOOL CALLBACK wnd_enum_tabs(HWND curr_wnd, LPARAM lp)
   {
     bool trace = (bool)lp;
@@ -1127,9 +1262,15 @@ refresh_tabinfo(bool trace)
     }
     return true;
   }
+#else
+  #define wnd_enum_tabs wnd_enum_tabs_refresh
+#endif  /* !__MINGW32__: wnd_enum_tabs (refresh) */
 
   clear_tabinfo();
   EnumWindows(wnd_enum_tabs, (LPARAM)trace);
+#ifdef __MINGW32__
+  #undef wnd_enum_tabs
+#endif
   sort_tabinfo();
 #if defined(debug_tabbar) || defined(debug_win_switch)
   for (int w = 0; w < ntabinfo; w++)
@@ -1140,9 +1281,27 @@ refresh_tabinfo(bool trace)
 /*
   Update list of windows in all windows of the mintty class.
  */
+#ifdef __MINGW32__
+static BOOL CALLBACK
+wnd_enum_tabs_update(HWND curr_wnd, LPARAM lp)
+{
+  (void)lp;
+  WINDOWINFO curr_wnd_info;
+  curr_wnd_info.cbSize = sizeof(WINDOWINFO);
+  GetWindowInfo(curr_wnd, &curr_wnd_info);
+  if (class_atom == curr_wnd_info.atomWindowType) {
+    if (curr_wnd != wnd) {
+      PostMessage(curr_wnd, WM_USER, 0, WIN_TITLE);
+    }
+  }
+  return true;
+}
+#endif  /* __MINGW32__: wnd_enum_tabs_update */
+
 static void
 update_tab_titles()
 {
+#ifndef __MINGW32__
   BOOL CALLBACK wnd_enum_tabs(HWND curr_wnd, LPARAM lp)
   {
     (void)lp;
@@ -1159,6 +1318,9 @@ update_tab_titles()
     }
     return true;
   }
+#else
+  #define wnd_enum_tabs wnd_enum_tabs_update
+#endif  /* !__MINGW32__: wnd_enum_tabs (update) */
   if (sync_level() || win_tabbar_visible()) {
     // update my own list
     refresh_tabinfo(true);
@@ -1167,6 +1329,9 @@ update_tab_titles()
     // tell the others to update theirs
     EnumWindows(wnd_enum_tabs, 0);
   }
+#ifdef __MINGW32__
+  #undef wnd_enum_tabs
+#endif
 }
 
 static bool
@@ -1801,9 +1966,26 @@ win_gotab(uint n)
 #endif
 }
 
+#ifdef __MINGW32__
+static BOOL CALLBACK
+wnd_enum_tabs_sync(HWND curr_wnd, LPARAM lp)
+{
+  int level = (int)lp;
+  WINDOWINFO curr_wnd_info;
+  curr_wnd_info.cbSize = sizeof(WINDOWINFO);
+  GetWindowInfo(curr_wnd, &curr_wnd_info);
+  if (class_atom == curr_wnd_info.atomWindowType) {
+    if (curr_wnd != wnd)
+      win_post_sync_msg(curr_wnd, level);
+  }
+  return true;
+}
+#endif  /* __MINGW32__: wnd_enum_tabs_sync */
+
 static void
 win_synctabs(int level)
 {
+#ifndef __MINGW32__
   BOOL CALLBACK wnd_enum_tabs(HWND curr_wnd, LPARAM lp)
   {
     int level = (int)lp;
@@ -1818,6 +2000,9 @@ win_synctabs(int level)
     }
     return true;
   }
+#else
+  #define wnd_enum_tabs wnd_enum_tabs_sync
+#endif  /* !__MINGW32__: wnd_enum_tabs (sync) */
 
 #ifdef debug_tabs
   printf("[%8p] win_synctabs\n", wnd);
@@ -1826,6 +2011,9 @@ win_synctabs(int level)
     return;
   if (sync_level() >= level)
     EnumWindows(wnd_enum_tabs, (LPARAM)level);
+#ifdef __MINGW32__
+  #undef wnd_enum_tabs
+#endif
 #ifdef debug_tabs
   printf("[%8p] win_synctabs end\n", wnd);
 #endif
@@ -1855,11 +2043,27 @@ get_my_monitor_info(MONITORINFO *mip)
 }
 
 
+#ifdef __MINGW32__
+struct data_get_monitor_info_ {
+  int moni;
+  MONITORINFO *mip;
+};
+static BOOL CALLBACK
+monitor_enum_gmi(HMONITOR hMonitor, HDC hdcMonitor, LPRECT monp, LPARAM dwData)
+{
+  (void)hdcMonitor; (void)monp;
+  struct data_get_monitor_info_ * pdata = (struct data_get_monitor_info_ *)dwData;
+  GetMonitorInfo(hMonitor, pdata->mip);
+  return --(pdata->moni) > 0;
+}
+#endif  /* __MINGW32__: monitor_enum_gmi */
+
 static void
 get_monitor_info(int moni, MONITORINFO *mip)
 {
   mip->cbSize = sizeof(MONITORINFO);
 
+#ifndef __MINGW32__
   struct data_get_monitor_info {
     int moni;
     MONITORINFO *mip;
@@ -1877,10 +2081,17 @@ get_monitor_info(int moni, MONITORINFO *mip)
   }
 
   struct data_get_monitor_info data = {
+#else
+  struct data_get_monitor_info_ data = {
+#endif
     .moni = moni,
     .mip = mip
   };
+#ifdef __MINGW32__
+  EnumDisplayMonitors(0, 0, monitor_enum_gmi, (LPARAM)&data);
+#else
   EnumDisplayMonitors(0, 0, monitor_enum, (LPARAM)&data);
+#endif
 }
 
 #define dont_debug_display_monitors_mockup
@@ -1933,6 +2144,63 @@ static long current_monitor = 1 - 1;  // assumption for MonitorFromWindow
      prints information about all monitors
        used by option -Rm
  */
+#ifdef __MINGW32__
+struct data_search_monitors_ {
+  HMONITOR lookup_mon;
+  int moni;
+  int moni_found;
+  int *minx, *miny;
+  RECT vscr;
+  HMONITOR refmon, curmon;
+  int get_primary;
+  bool print_monitors;
+};
+static BOOL CALLBACK
+monitor_enum_sm(HMONITOR hMonitor, HDC hdcMonitor, LPRECT monp, LPARAM dwData)
+{
+  struct data_search_monitors_ *data = (struct data_search_monitors_ *)dwData;
+  (void)hdcMonitor, (void)monp;
+
+  data->moni ++;
+  if (hMonitor == data->lookup_mon) {
+    // looking for index of specific monitor
+    data->moni_found = data->moni;
+    return FALSE;
+  }
+
+  MONITORINFO mi;
+  mi.cbSize = sizeof(MONITORINFO);
+  GetMonitorInfo(hMonitor, &mi);
+
+  if (data->get_primary && (mi.dwFlags & MONITORINFOF_PRIMARY)) {
+    data->moni_found = data->moni;  // fallback to be overridden by monitor found later
+    data->refmon = hMonitor;
+  }
+
+  // determining smallest monitor width and height
+  RECT fr = mi.rcMonitor;
+  if (*(data->minx) == 0 || *(data->minx) > fr.right - fr.left)
+    *(data->minx) = fr.right - fr.left;
+  if (*(data->miny) == 0 || *(data->miny) > fr.bottom - fr.top)
+    *(data->miny) = fr.bottom - fr.top;
+  data->vscr.top = min(data->vscr.top, fr.top);
+  data->vscr.left = min(data->vscr.left, fr.left);
+  data->vscr.right = max(data->vscr.right, fr.right);
+  data->vscr.bottom = max(data->vscr.bottom, fr.bottom);
+
+  if (data->print_monitors) {
+    printf("Monitor %d %s %s w,h %4d,%4d (l %4d,t %4d .. r %4d,b %4d)\n",
+           data->moni,
+           hMonitor == data->curmon ? "current" : "       ",
+           mi.dwFlags & MONITORINFOF_PRIMARY ? "primary" : "       ",
+           (int)(fr.right - fr.left), (int)(fr.bottom - fr.top),
+           (int)fr.left, (int)fr.top, (int)fr.right, (int)fr.bottom);
+  }
+
+  return TRUE;
+}
+#endif  /* __MINGW32__: monitor_enum_sm */
+
 int
 search_monitors(int * minx, int * miny, HMONITOR lookup_mon, int get_primary, MONITORINFO *mip)
 {
@@ -1972,6 +2240,7 @@ search_monitors(int * minx, int * miny, HMONITOR lookup_mon, int get_primary, MO
   }
 #endif
 
+#ifndef __MINGW32__
   struct data_search_monitors {
     HMONITOR lookup_mon;
     int moni;
@@ -1982,8 +2251,13 @@ search_monitors(int * minx, int * miny, HMONITOR lookup_mon, int get_primary, MO
     int get_primary;
     bool print_monitors;
   };
+#endif
 
+#ifndef __MINGW32__
   struct data_search_monitors data = {
+#else
+  struct data_search_monitors_ data = {
+#endif
     .moni = 0,
     .moni_found = 0,
     .lookup_mon = lookup_mon,
@@ -2007,6 +2281,7 @@ search_monitors(int * minx, int * miny, HMONITOR lookup_mon, int get_primary, MO
      (see invocation descriptions of search_monitors above);
      this code is obscure and needs revision
    */
+#ifndef __MINGW32__
   BOOL CALLBACK
   monitor_enum(HMONITOR hMonitor, HDC hdcMonitor, LPRECT monp, LPARAM dwData)
   {
@@ -2055,8 +2330,14 @@ search_monitors(int * minx, int * miny, HMONITOR lookup_mon, int get_primary, MO
 
     return TRUE;
   }
+#else
+  #define monitor_enum monitor_enum_sm
+#endif
 
   EnumDisplayMonitors(0, 0, monitor_enum, (LPARAM)&data);
+#ifdef __MINGW32__
+  #undef monitor_enum
+#endif
 
   if (!lookup_mon && !mip && !get_primary) {
     *minx = data.vscr.right - data.vscr.left;
@@ -3004,7 +3285,9 @@ win_keyclick(void)
 
 /*
  * Beep with audio output library libao, for DECPS.
+ * Not used on MinGW (Beep() is used directly instead).
  */
+#ifndef __MINGW32__
 static void * libao = 0;
 
 typedef struct {
@@ -3138,6 +3421,7 @@ aolib_beep(uint tone, float vol, float freq, uint ms)
 
   ao_play(ao_device, buffer, buf_size);
 }
+#endif  // !__MINGW32__ (aolib section)
 
 /*
  * Beep for DECPS.
@@ -3152,6 +3436,9 @@ win_beep(uint tone, float vol, float freq, uint ms)
     float freq;
   } params = {tone, ms, vol, freq};
 
+#ifdef __MINGW32__
+  Beep((int)(params.freq + 0.5), params.ms);
+#else
 static int beep_pid = -1;
 static int fd[2];
   if (beep_pid <= 0) {
@@ -3168,8 +3455,8 @@ static int fd[2];
       close(fd[1]);
 
 #ifdef external_beeper
-      // in case of external beep handling, remap the pipe 
-      // to file descriptor 0 and fork an external beep server; 
+      // in case of external beep handling, remap the pipe
+      // to file descriptor 0 and fork an external beep server;
       // but it does not improve the jitter when using Windows Beep
       close(0);
       dup2(fd[0], 0);
@@ -3205,7 +3492,24 @@ static FILE * bf = 0;
 #endif
 
   write(fd[1], &params, sizeof(params));
+#endif
 }
+
+#ifdef __MINGW32__
+static void
+set_bells_(wchar **bell_name_p, config *conf, char *belli)
+{
+  while (*belli) {
+    int i = (*belli & 0x0F) - 2;
+    if (i >= 0 && i < (int)lengthof(conf->bell_file))
+      *bell_name_p = (wchar *)conf->bell_file[i];
+    if (*bell_name_p && **bell_name_p) {
+      return;
+    }
+    belli++;
+  }
+}
+#endif
 
 /*
  * Bell.
@@ -3228,6 +3532,7 @@ do_win_bell(config * conf, bool margin_bell)
     bellstate->last_vol = bellstate->vol;
 
     wchar * bell_name = 0;
+#ifndef __MINGW32__
     void set_bells(char * belli)
     {
       while (*belli) {
@@ -3240,6 +3545,9 @@ do_win_bell(config * conf, bool margin_bell)
         belli++;
       }
     }
+#else
+    #define set_bells(belli) set_bells_(&bell_name, conf, (belli))
+#endif
     switch (bellstate->vol) {
       // no bell volume: 0 1
       // low bell volume: 2 3 4
@@ -3252,6 +3560,9 @@ do_win_bell(config * conf, bool margin_bell)
       when 3: set_bells("3425678");
       when 2: set_bells("2345678");
     }
+#ifdef __MINGW32__
+    #undef set_bells
+#endif
 
     bool free_bell_name = false;
     if (bell_name && *bell_name) {
@@ -3625,6 +3936,7 @@ static short normal_cols = 0;
 static int normal_y, normal_x;
 static uint normal_dpi;
 #endif
+#ifndef __MINGW32__
   void save_win_pos(void) {
 #ifdef broken_fix_for_normal_position_resilience
     normal_rows = term.rows;
@@ -3633,6 +3945,9 @@ static uint normal_dpi;
     normal_dpi = dpi;
 #endif
   }
+#else
+# define save_win_pos() ((void)0)
+#endif
 
   /* for some weird reason, changes to avoid ShowWindow in commit 113286
      make initial interactive fullscreen or win-max toggle fail;
@@ -5796,6 +6111,18 @@ typedef struct {
   return DefWindowProcW(wnd, message, wp, lp);
 }
 
+#ifdef __MINGW32__
+static bool
+is_hooked_hotkey(WPARAM wParam, uint key, mod_keys mods)
+{
+#ifdef debug_hook
+  show_info(asform("key %02X mods %02X hooked %02X mods %02X", key, mods, hotkey, hotkey_mods));
+#endif
+  return wParam == WM_KEYDOWN &&
+    (key == hotkey && mods == hotkey_mods);
+}
+#endif
+
 static LRESULT CALLBACK
 hookprockbll(int nCode, WPARAM wParam, LPARAM lParam)
 {
@@ -5810,6 +6137,7 @@ hookprockbll(int nCode, WPARAM wParam, LPARAM lParam)
          key, (uint)kbdll->scanCode, (uint)kbdll->flags, (ulong)kbdll->dwExtraInfo);
 #endif
 
+#ifndef __MINGW32__
   bool is_hooked_hotkey(WPARAM wParam, uint key, mod_keys mods)
   {
 #ifdef debug_hook
@@ -5821,6 +6149,7 @@ hookprockbll(int nCode, WPARAM wParam, LPARAM lParam)
       // * configurable explicitly (not implemented)
       (key == hotkey && mods == hotkey_mods);
   }
+#endif
   if (is_hooked_hotkey(wParam, key, get_mods())) {
     if (GetFocus() == wnd && IsWindowVisible(wnd)) {
       // this probably makes no sense after IsWindowVisible(wnd):
@@ -6896,6 +7225,87 @@ opts[] = {
   {0, 0, 0, 0}
 };
 
+#ifdef __MINGW32__
+static int dynfonts = 0;
+static void
+add_font(wchar * fn)
+{
+  int n = AddFontResourceExW(fn, FR_PRIVATE, 0);
+  if (n)
+    dynfonts += n;
+  else
+    printf("Failed to add font %ls\n", fn);
+}
+
+static void
+check_unhide_or_clear_tab(void)
+{
+  bool all_hidden = true;
+  bool vanished = false;
+#ifdef sanitize_min_restore_via_monitoring
+  bool allmin = true;
+#endif
+
+  for (int w = 0; w < ntabinfo; w++) {
+    HWND curr_wnd = tabinfo[w].wnd;
+
+#ifdef sanitize_min_restore_via_monitoring
+    LONG style = GetWindowLong(curr_wnd, GWL_STYLE);
+    bool currmin = style & WS_MINIMIZE;
+    if (!currmin)
+      allmin = false;
+#endif
+
+    WINDOWINFO curr_wnd_info;
+    curr_wnd_info.cbSize = sizeof(WINDOWINFO);
+    if (!GetWindowInfo(curr_wnd, &curr_wnd_info)) {
+      vanished = true;
+      if (!manage_tab_hiding())
+        break;
+    }
+    else if (manage_tab_hiding()
+             && class_atom == curr_wnd_info.atomWindowType
+             && pGetLayeredWindowAttributes
+            )
+    {
+      bool layered = GetWindowLong(curr_wnd, GWL_EXSTYLE) & WS_EX_LAYERED;
+      BYTE b;
+      pGetLayeredWindowAttributes(curr_wnd, 0, &b, 0);
+      bool hidden = layered && !b;
+
+      if (!hidden) {
+        all_hidden = false;
+        // don't break; continue to check for vanished
+      }
+    }
+  }
+#ifdef sanitize_min_restore_via_monitoring
+  if (allmin) {
+    //TODO: ensure a background tab is accessible;
+    // maybe also check for WS_EX_LAYERED-hidden background tabs...
+  }
+#endif
+
+#ifdef monitor_focussed_tab_on_top
+  // tab management: ensure focussed tab on top
+  if (manage_tab_hiding() && term.has_focus && !poschanging) {
+    win_set_tab_focus('G');
+    return;
+  }
+#endif
+
+  if (manage_tab_hiding() && all_hidden) {
+#ifdef fix1242c
+    // unhide myself, hide other tabs:
+    win_set_tab_focus('U');
+#endif
+    win_update_transparency(cfg.transparency, cfg.opaque_when_focused);
+  }
+  if (vanished)
+    update_tab_titles();
+}
+#endif  /* __MINGW32__ */
+
 int
 main(int argc, char *argv[])
 {
@@ -6924,6 +7334,14 @@ main(int argc, char *argv[])
 
   // Determine home directory.
   home = getenv("HOME");
+#ifdef __MINGW32__
+  if (!home)
+    home = getenv("USERPROFILE");
+  if (!home)
+    home = asform("/home/%s", getenv("USERNAME") ? getenv("USERNAME") : "user");
+  else
+    home = strdup(home);
+#else
 #if CYGWIN_VERSION_DLL_MAJOR >= 1005
   // Before Cygwin 1.5, the passwd structure is faked.
   struct passwd *pw = getpwuid(getuid());
@@ -6933,6 +7351,7 @@ main(int argc, char *argv[])
     (pw && pw->pw_dir && *pw->pw_dir) ? strdup(pw->pw_dir) :
 #endif
     asform("/home/%s", getlogin());
+#endif
 
   // Set size and position defaults.
   STARTUPINFOW sui;
@@ -7369,6 +7788,7 @@ main(int argc, char *argv[])
   }
 
   // Provide temporary fonts
+#ifndef __MINGW32__
 static int dynfonts = 0;
   void add_font(wchar * fn)
   {
@@ -7384,6 +7804,7 @@ static int dynfonts = 0;
     else
       printf("Failed to add font %ls\n", fn);
   }
+#endif
   handle_file_resources(W("fonts/*"), add_font);
   //printf("Added %d fonts\n", dynfonts);
 
@@ -7474,6 +7895,7 @@ static int dynfonts = 0;
   // if started from console, try to detach from caller's terminal (~daemonizing)
   // in order to not suppress signals
   // (indicated by isatty if linked with -mwindows as ttyname() is null)
+#ifndef __MINGW32__
   bool daemonize = cfg.daemonize && !isatty(0);
   // disable daemonizing if started from desktop
   if (invoked_from_shortcut)
@@ -7492,6 +7914,7 @@ static int dynfonts = 0;
 
     setsid();  // detach child process
   }
+#endif
 
   load_dwm_funcs();  // must be called after the fork() above!
 
@@ -8479,10 +8902,11 @@ static int dynfonts = 0;
   }
   if (report_winid) {
     printf("%p\n", wnd);
-    printf("%08lX\n", (ulong)wnd);
+    printf("%08lX\n", (ulong)(uintptr_t)wnd);
     fflush(stdout);
   }
 
+#ifndef __MINGW32__
 #ifdef do_check_unhide_tab_via_enumwindows
   void check_unhide_tab(void)
   {
@@ -8587,7 +9011,8 @@ static int dynfonts = 0;
     if (vanished)
       update_tab_titles();
   }
-#endif
+#endif  /* do_check_unhide_tab_via_enumwindows */
+#endif  /* !__MINGW32__ */
 
 #ifdef debug_hidden_tabs
   void check_hidden_tabs(void)

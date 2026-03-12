@@ -19,7 +19,9 @@
 #include <windows.h>  // registry handling
 #include "winpriv.h"  // support_wsl, load_library_func
 
+#ifndef __MINGW32__
 #include <termios.h>
+#endif
 #ifdef __CYGWIN__
 #include <sys/cygwin.h>  // cygwin_internal
 #endif
@@ -873,7 +875,8 @@ save_filename(char * suf)
   struct timeval now;
   gettimeofday(& now, 0);
   char * fn = newn(char, MAX_PATH + 1 + strlen(suf));
-  strftime(fn, MAX_PATH, pat, localtime(& now.tv_sec));
+  time_t now_sec = (time_t)now.tv_sec;
+  strftime(fn, MAX_PATH, pat, localtime(&now_sec));
   //printf("save_filename [%s] (%s) -> %s%s\n", pat, suf, fn, suf);
   free(pat);
   strcat(fn, suf);
@@ -1312,7 +1315,7 @@ get_resource_file(wstring sub, wstring res, bool towrite)
     char * resfn = path_win_w_to_posix(rf);
     free(rf);
     fd = open(resfn, towrite ? O_CREAT | O_EXCL | O_WRONLY | O_BINARY : O_RDONLY | O_BINARY, 0644);
-#if CYGWIN_VERSION_API_MINOR >= 194
+#if CYGWIN_VERSION_API_MINOR >= 194 && !defined(__MINGW32__)
     if (towrite && fd < 0 && errno == ENOENT) {
       // try to create resource subdirectories
       int dd = open(config_dirs[i], O_RDONLY | O_DIRECTORY);
@@ -1335,7 +1338,7 @@ get_resource_file(wstring sub, wstring res, bool towrite)
     int errno_code = errno;
     free(resfn);
 
-#if CYGWIN_VERSION_API_MINOR >= 194
+#if CYGWIN_VERSION_API_MINOR >= 194 && !defined(__MINGW32__)
     if (lookup_emojis && config_emojis[i] == -1) {
       // check and remember whether config directory has subdirectory emojis
       char * emojis_dir = asform("%s/emojis", config_dirs[i]);
@@ -1434,29 +1437,30 @@ wchar * wloctext(string msg)
 }
 
 static char *
+unescape(char * s)
+{
+  char * t = s;
+  while (*s && *s != '"') {
+    if (*s == '\\') {
+      s++;
+      switch (*s) {
+        when 't': *t = '\t';
+        when 'n': *t = '\n';
+        otherwise: *t = *s;
+      }
+    }
+    else
+      *t = *s;
+    t++;
+    s++;
+  }
+  *t = '\0';
+  return t;
+}
+
+static char *
 readtext(char * buf, int len, FILE * file)
 {
-  char * unescape(char * s)
-  {
-    char * t = s;
-    while (*s && *s != '"') {
-      if (*s == '\\') {
-        s++;
-        switch (*s) {
-          when 't': *t = '\t';
-          when 'n': *t = '\n';
-          otherwise: *t = *s;
-        }
-      }
-      else
-        *t = *s;
-      t++;
-      s++;
-    }
-    *t = '\0';
-    return t;
-  }
-
   char * p = buf;
   while (*p != ' ')
     p++;
@@ -2278,7 +2282,11 @@ do_file_resources(control *ctrl, wstring pattern, bool list_dirs, str_fn fnh)
         if (patsuf && !strstr(direntry->d_name, patsuf))
           continue;
 
+#ifdef __MINGW32__
+        if (list_dirs) {
+#else
         if (list_dirs && direntry->d_type == DT_DIR) {
+#endif
           if (direntry->d_name[0] != '.' && !!strcmp(direntry->d_name, "common"))
             // exclude the [0-7] links left over by the `getemojis` script
             if (strlen(direntry->d_name) > 1) {
@@ -2490,43 +2498,49 @@ lang_handler(control *ctrl, int event)
   }
 }
 
+static bool
+terminfo_exists_in(char * dir, char * sub, char * ti)
+{
+  char * terminfo = asform("%s%s/%x/%s", dir, sub ?: "", *ti, ti);
+  bool exists = !access(terminfo, R_OK);
+  //printf("exists %d <%s>\n", exists, terminfo);
+  free(terminfo);
+  if (support_wsl && !exists) {
+    terminfo = asform("%s%s/%c/%s", dir, sub ?: "", *ti, ti);
+    exists = !access(terminfo, R_OK);
+    //printf("exists %d <%s>\n", exists, terminfo);
+    free(terminfo);
+  }
+  return exists;
+}
+
+static bool
+terminfo_exists(char * ti)
+{
+  if (support_wsl) {
+    char * wslroot;
+    if (wslname) {
+      char * wslnamec = cs__wcstombs(wslname);
+      wslroot = asform("//wsl$/%s", wslnamec);
+      free(wslnamec);
+    }
+    else if (*wsl_basepath)
+      wslroot = path_win_w_to_posix(wsl_basepath);
+    else
+      wslroot = strdup("");
+    bool ex = terminfo_exists_in(wslroot, "/usr/share/terminfo", ti);
+    free(wslroot);
+    return ex;
+  }
+  else
+    return terminfo_exists_in("/usr/share/terminfo", 0, ti)
+        || terminfo_exists_in(home, "/.terminfo", ti)
+         ;
+}
+
 static void
 term_handler(control *ctrl, int event)
 {
-  bool terminfo_exists(char * ti) {
-    bool terminfo_exists_in(char * dir, char * sub, char * ti) {
-      char * terminfo = asform("%s%s/%x/%s", dir, sub ?: "", *ti, ti);
-      bool exists = !access(terminfo, R_OK);
-      //printf("exists %d <%s>\n", exists, terminfo);
-      free(terminfo);
-      if (support_wsl && !exists) {
-        terminfo = asform("%s%s/%c/%s", dir, sub ?: "", *ti, ti);
-        exists = !access(terminfo, R_OK);
-        //printf("exists %d <%s>\n", exists, terminfo);
-        free(terminfo);
-      }
-      return exists;
-    }
-    if (support_wsl) {
-      char * wslroot;
-      if (wslname) {
-        char * wslnamec = cs__wcstombs(wslname);
-        wslroot = asform("//wsl$/%s", wslnamec);
-        free(wslnamec);
-      }
-      else if (*wsl_basepath)
-        wslroot = path_win_w_to_posix(wsl_basepath);
-      else
-        wslroot = strdup("");
-      bool ex = terminfo_exists_in(wslroot, "/usr/share/terminfo", ti);
-      free(wslroot);
-      return ex;
-    }
-    else
-      return terminfo_exists_in("/usr/share/terminfo", 0, ti)
-          || terminfo_exists_in(home, "/.terminfo", ti)
-           ;
-  }
   switch (event) {
     when EVENT_REFRESH:
       dlg_listbox_clear(ctrl);
@@ -2720,6 +2734,7 @@ download_scheme(char * url)
   colour cursor_colour = (colour)-1, sel_fg_colour = (colour)-1, sel_bg_colour = (colour)-1;
   colour underl_colour = (colour)-1, hover_colour = (colour)-1;
   // construct a ColourScheme string
+#ifndef __MINGW32__
   void schapp(char * opt, colour c)
   {
 #if defined(debug_scheme) && debug_scheme > 1
@@ -2762,6 +2777,7 @@ download_scheme(char * url)
     schapp("BoldCyan", ansi_colours[BOLD_CYAN_I]);
     schapp("BoldWhite", ansi_colours[BOLD_WHITE_I]);
   }
+#endif  // !__MINGW32__
 
   char * urlsuf = strrchr(url, '.');
   if (urlsuf && !strcmp(urlsuf, ".itermcolors")) {
@@ -2848,7 +2864,9 @@ download_scheme(char * url)
       }
     }
     // collect modified colours into colour scheme string
+#ifndef __MINGW32__
     schappall();
+#endif
   }
   else if (urlsuf && !strcmp(urlsuf, ".json")) {
     // support .json theme files in either vscode or Windows terminal format
@@ -2885,6 +2903,7 @@ download_scheme(char * url)
         printf("<%s> <%s> (%s)\n", key, val, linebuf);
 #endif
         // transform .json colour names
+#ifndef __MINGW32__
         void schapp(char * jname, char * name)
         {
           if (strcasecmp(key, jname) == 0) {
@@ -2916,7 +2935,11 @@ download_scheme(char * url)
         schapp("brightwhite", "BoldWhite");
         schapp("foreground", "ForegroundColour");
         schapp("background", "BackgroundColour");
+#endif
       }
+#ifdef __MINGW32__
+        (void)key; (void)val;
+#endif
     }
   }
   else {
@@ -2931,6 +2954,7 @@ download_scheme(char * url)
         // handle drag-and-drop json formats that contain colour specs like 
         // "Red=190,70,120" (https://github.com/mskyaxl/wsl-terminal) or
         // "Red=220,50,47\r" (https://github.com/oumu/mintty-color-schemes)
+#ifndef __MINGW32__
         void schapp(char * name)
         {
           char specbuf[30];
@@ -2977,6 +3001,7 @@ download_scheme(char * url)
         schapp("BoldCyan");
         schapp("BoldWhite");
         goto scheme_return;
+#endif
       }
 
       char * eq = linebuf;
@@ -3021,7 +3046,15 @@ download_scheme(char * url)
     }
   }
 
+#ifdef __MINGW32__
+  // Suppress unused-variable warnings for colour vars only read by guarded schapp calls
+  (void)fg_colour; (void)bg_colour; (void)bold_colour; (void)blink_colour;
+  (void)cursor_colour; (void)sel_fg_colour; (void)sel_bg_colour;
+  (void)underl_colour; (void)hover_colour;
+#endif
+#ifndef __MINGW32__
 scheme_return:
+#endif
 
 #ifdef use_curl
   pclose(sf);
@@ -3788,6 +3821,25 @@ struct data_fontenum {
   bool outer;
 };
 
+static wchar *
+tagsplit(wchar * fn, wstring style)
+{
+#if CYGWIN_VERSION_API_MINOR >= 74
+  wchar * tag = wcsstr(fn, style);
+  if (tag) {
+    int n = wcslen(style);
+    if (tag[n] <= ' ' && tag != fn && tag[-1] == ' ') {
+      tag[-1] = 0;
+      tag[n] = 0;
+      return tag;
+    }
+  }
+#else
+  (void)fn; (void)style;
+#endif
+  return 0;
+}
+
 static int CALLBACK
 fontenum(const ENUMLOGFONTW *lpelf, const NEWTEXTMETRICW *lpntm, DWORD fontType, LPARAM lParam)
 {
@@ -3807,24 +3859,6 @@ fontenum(const ENUMLOGFONTW *lpelf, const NEWTEXTMETRICW *lpntm, DWORD fontType,
     if (lfp->lfFaceName[0] == '@')
       // skip vertical font families
       return 1;
-
-    wchar * tagsplit(wchar * fn, wstring style)
-    {
-#if CYGWIN_VERSION_API_MINOR >= 74
-      wchar * tag = wcsstr(fn, style);
-      if (tag) {
-        int n = wcslen(style);
-        if (tag[n] <= ' ' && tag != fn && tag[-1] == ' ') {
-          tag[-1] = 0;
-          tag[n] = 0;
-          return tag;
-        }
-      }
-#else
-      (void)fn; (void)style;
-#endif
-      return 0;
-    }
 
     /**
 	Courier|
@@ -4125,6 +4159,25 @@ transparency_selhandler(control *ctrl, int event)
   if (event == EVENT_VALCHANGE) {
     transparency_valhandler(transparency_valbox, EVENT_REFRESH);
   }
+}
+
+static int
+strwidth(string s0)
+{
+  int len = 0;
+  unsigned char * sp = (unsigned char *)s0;
+  while (*sp) {
+    if ((*sp >= 0xE3 && *sp <= 0xED) ||
+        (*sp == 0xF0 && *(sp + 1) >= 0xA0 && *(sp + 1) <= 0xBF))
+      // approx. CJK range
+      len += 4;
+    else if (strchr(" il.,'()!:;[]|", *sp))
+      len ++;
+    else if (*sp != '&' && (*sp & 0xC0) != 0x80)
+      len += 2;
+    sp++;
+  }
+  return len;
 }
 
 static void
@@ -5086,22 +5139,6 @@ setup_config_box(controlbox * b)
   ctrl_columns(s, 1, 100);  // reset column stuff so we can rearrange them
   // balance column widths of the following 3 fields 
   // to accommodate different length of localized labels
-  int strwidth(string s0) {
-    int len = 0;
-    unsigned char * sp = (unsigned char *)s0;
-    while (*sp) {
-      if ((*sp >= 0xE3 && *sp <= 0xED) || 
-          (*sp == 0xF0 && *(sp + 1) >= 0xA0 && *(sp + 1) <= 0xBF))
-        // approx. CJK range
-        len += 4;
-      else if (strchr(" il.,'()!:;[]|", *sp))
-        len ++;
-      else if (*sp != '&' && (*sp & 0xC0) != 0x80)
-        len += 2;
-      sp++;
-    }
-    return len;
-  }
   //__ Options - Terminal: bell
   string lbl_flash = _("&Flash");
   //__ Options - Terminal: bell

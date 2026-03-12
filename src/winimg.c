@@ -34,8 +34,13 @@ bool force_imgs = true;
 // GDI+ handling
 static IStream * (WINAPI * pSHCreateMemStream)(void *, UINT) = 0;
 
+#ifdef __MINGW32__
+#include <gdiplus/gdiplus.h>
+#include <gdiplus/gdiplusflat.h>
+#else
 #include <w32api/gdiplus/gdiplus.h>
 #include <w32api/gdiplus/gdiplusflat.h>
+#endif
 
 #define dont_debug_gdiplus
 

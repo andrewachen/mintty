@@ -1053,9 +1053,23 @@ init_debug()
 #define trace_hook(...)	
 #endif
 
+#ifdef __MINGW32__
+// MinGW: setfont/setlabel are extracted from GCC nested functions (Clang doesn't support them).
+// Use a static capture for the dialog HWND so call sites don't change.
+static HWND _setlabels_hwnd;
+static void setfont(int id) { (void)id; }
+static void setlabel(int id, wstring label) {
+  HWND button = GetDlgItem(_setlabels_hwnd, id);
+  if (button && label) SetWindowTextW(button, label);
+}
+#endif
+
 static LRESULT
 set_labels(bool font_chooser, int nCode, WPARAM wParam, LPARAM lParam)
 {
+#ifdef __MINGW32__
+  _setlabels_hwnd = (HWND)wParam;
+#endif
   bool localize = *cfg.lang;
 
 #ifdef debug_dialog_hook
@@ -1100,6 +1114,7 @@ set_labels(bool font_chooser, int nCode, WPARAM wParam, LPARAM lParam)
   }
 #endif
 
+#ifndef __MINGW32__
   void setfont(int id)
   {
     HWND button = GetDlgItem((HWND)wParam, id);
@@ -1120,6 +1135,7 @@ set_labels(bool font_chooser, int nCode, WPARAM wParam, LPARAM lParam)
     // adjust custom font
     setfont(id);
   }
+#endif
 
   static int adjust_sample = 0;  /* pre-adjust (here) vs post-adjust (below)
                                     0b01: post-adjust "Sample" frame

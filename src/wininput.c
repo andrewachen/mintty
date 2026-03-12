@@ -13,7 +13,9 @@
 #include <math.h>
 #include <windowsx.h>  // GET_X_LPARAM, GET_Y_LPARAM
 #include <winnls.h>
+#ifndef __MINGW32__
 #include <termios.h>
+#endif
 
 
 static HMENU ctxmenu = NULL;
@@ -52,7 +54,7 @@ struct function_def {
 static struct function_def * function_def(char * cmd);
 
 
-static inline void
+__attribute__((unused)) static inline void
 show_last_error()
 {
   int err = GetLastError();
@@ -126,7 +128,7 @@ icon_bitmap(HICON hIcon)
 
 /* Menu handling */
 
-static inline void
+__attribute__((unused)) static inline void
 show_menu_info(HMENU menu)
 {
   MENUINFO mi;
@@ -336,6 +338,161 @@ add_launcher(HMENU menu, bool vsep, bool hsep)
 
 #define dont_debug_modify_menu
 
+#ifdef __MINGW32__
+static wchar *
+itemlabel(char * label)
+{
+  char * loc = _(label);
+  if (loc == label)
+    // no localization entry
+    return null;  // indicate to use system localization
+  else
+    return _W(label);  // use our localization
+}
+
+static void
+modify_menu(HMENU menu, UINT item, UINT state, wchar * label, wchar * key)
+// if item is sysentry: ignore state
+// state: MF_ENABLED, MF_GRAYED, MF_CHECKED, MF_UNCHECKED
+// label: if null, use current label
+// key: shortcut description; localize "Ctrl+Alt+Shift+"
+{
+  bool sysentry = item >= 0xF000;
+#ifdef debug_modify_menu
+  if (sysentry)
+    printf("mm %04X <%ls> <%ls>\n", item, label, key);
+#endif
+
+  MENUITEMINFOW mi;
+  mi.cbSize = sizeof(MENUITEMINFOW);
+#define dont_debug_menuitem
+#ifdef debug_menuitem
+  mi.fMask = MIIM_BITMAP | MIIM_STATE | MIIM_STRING | MIIM_DATA;
+  mi.dwTypeData = NULL;
+  GetMenuItemInfoW(menu, item, 0, &mi);
+  mi.cch++;
+  mi.dwTypeData = newn(wchar, mi.cch);
+  int ok = GetMenuItemInfoW(menu, item, 0, &mi);
+  printf("%d %X %d<%ls> <%ls>\n", ok, mi.fState, mi.cch, mi.dwTypeData, (wstring)mi.dwItemData);
+  mi.fState &= ~MFS_DEFAULT;  // does not work if used 
+                              // in SetMenuItemInfoW with MIIM_STATE
+#endif
+  mi.fMask = MIIM_STRING;
+  if (!label || sysentry) {
+    mi.dwTypeData = NULL;
+    GetMenuItemInfoW(menu, item, 0, &mi);
+    mi.cch++;
+    mi.dwTypeData = newn(wchar, mi.cch);
+    if (sysentry)
+      mi.fMask |= MIIM_DATA;
+    GetMenuItemInfoW(menu, item, 0, &mi);
+  }
+
+  // prepare info to write
+  mi.fMask = MIIM_STRING;
+  if (sysentry) {
+    if (label) {
+      // backup system (localized) label to application data
+      if (!mi.dwItemData) {
+        mi.dwItemData = (ULONG_PTR)wcsdup(mi.dwTypeData);
+        mi.fMask |= MIIM_DATA;  // make sure it's stored
+      }
+    }
+    else if (mi.dwItemData) {
+      // restore system (localized) label from backup
+      mi.dwTypeData = wcsdup((wstring)mi.dwItemData);
+    }
+  }
+  //don't mi.fMask |= MIIM_ID; mi.wID = ...; would override item ID
+  if (label)
+    mi.dwTypeData = wcsdup(label);
+  if (!sysentry) {
+    mi.fMask |= MIIM_STATE | MIIM_FTYPE;
+    mi.fState = state;
+    mi.fType = MFT_STRING;
+  }
+  wchar * tab = wcschr(mi.dwTypeData, '\t');
+  if (tab)
+    *tab = '\0';
+  if (key) {
+    // append TAB and shortcut to label; localize "Ctrl+Alt+Shift+"
+    mod_keys mod = 0;
+    if (0 == wcsncmp(key, W("Ctrl+"), 5)) {
+      mod |= MDK_CTRL;
+      key += 5;
+    }
+    if (0 == wcsncmp(key, W("Alt+"), 4)) {
+      mod |= MDK_ALT;
+      key += 4;
+    }
+    if (0 == wcsncmp(key, W("Shift+"), 6)) {
+      mod |= MDK_SHIFT;
+      key += 6;
+    }
+    int len1 = wcslen(mi.dwTypeData) + 1
+               + (mod & MDK_CTRL ? wcslen(_W("Ctrl+")) : 0)
+               + (mod & MDK_ALT ? wcslen(_W("Alt+")) : 0)
+               + (mod & MDK_SHIFT ? wcslen(_W("Shift+")) : 0)
+               + wcslen(key) + 1;
+    mi.dwTypeData = renewn(mi.dwTypeData, len1);
+    wcscat(mi.dwTypeData, W("\t"));
+    if (mod & MDK_CTRL) wcscat(mi.dwTypeData, _W("Ctrl+"));
+    if (mod & MDK_ALT) wcscat(mi.dwTypeData, _W("Alt+"));
+    if (mod & MDK_SHIFT) wcscat(mi.dwTypeData, _W("Shift+"));
+    wcscat(mi.dwTypeData, key);
+  }
+#ifdef debug_modify_menu
+  if (sysentry)
+    printf("-> %04X [%04X] %04X <%ls>\n", item, mi.fMask, mi.fState, mi.dwTypeData);
+#endif
+
+  SetMenuItemInfoW(menu, item, 0, &mi);
+
+  free(mi.dwTypeData);
+}
+
+static void
+check_commands(HMENU menu, wstring commands, UINT_PTR idm_cmd)
+{
+  char * cmds = cs__wcstoutf(commands);
+  char * cmdp = cmds;
+  int n = 0;
+  char sepch = ';';
+  if ((uchar)*cmdp <= (uchar)' ')
+    sepch = *cmdp++;
+
+  char * paramp;
+  while ((paramp = strchr(cmdp, ':'))) {
+    *paramp++ = '\0';
+    char * newcmdp = strchr(paramp, sepch);
+    if (newcmdp)
+      *newcmdp++ = '\0';
+
+    struct function_def * fudef = function_def(paramp);
+    // localize
+    wchar * label = _W(cmdp);
+    uint status = 0;
+    if (fudef && fudef->fct_status) {
+      status = fudef->fct_status();
+      //EnableMenuItem(menu, idm_cmd + n, status);  // done by modify_menu
+    }
+    modify_menu(menu, idm_cmd + n, status, label, null);
+
+    cmdp = newcmdp;
+    n++;
+    if (!cmdp)
+      break;
+    // check for multi-line separation
+    if (*cmdp == '\\' && cmdp[1] == '\n') {
+      cmdp += 2;
+      while (iswspace(*cmdp))
+        cmdp++;
+    }
+  }
+  free(cmds);
+}
+#endif  /* __MINGW32__: static menu helpers */
+
 void
 win_update_menus(bool callback)
 {
@@ -354,6 +511,7 @@ win_update_menus(bool callback)
   printf("win_update_menus\n");
 #endif
 
+#ifndef __MINGW32__
   void
   modify_menu(HMENU menu, UINT item, UINT state, wchar * label, wchar * key)
   // if item is sysentry: ignore state
@@ -465,6 +623,7 @@ win_update_menus(bool callback)
     else
       return _W(label);  // use our localization
   }
+#endif  /* !__MINGW32__ */
 
   //__ System menu:
   modify_menu(sysmenu, SC_RESTORE, 0, itemlabel(__("&Restore")), null);
@@ -601,6 +760,7 @@ win_update_menus(bool callback)
   modify_menu(sysmenu, IDM_OPTIONS, 0, _W("&Options..."), null);
 
   // update user-defined menu functions (checked/enabled)
+#ifndef __MINGW32__
   void
   check_commands(HMENU menu, wstring commands, UINT_PTR idm_cmd)
   {
@@ -641,6 +801,7 @@ win_update_menus(bool callback)
     }
     free(cmds);
   }
+#endif  /* !__MINGW32__: check_commands */
   if (*cfg.ctx_user_commands)
     check_commands(ctxmenu, cfg.ctx_user_commands, IDM_CTXMENUFUNCTION);
   if (*cfg.sys_user_commands)
@@ -913,19 +1074,26 @@ static int is_lctrl = 0;
 static bool is_ralt = false;
 static bool is_altgr = false;
 
+#ifdef __MINGW32__
+static bool is_key_down(uchar vk) { return GetKeyState(vk) & 0x80; }
+#endif
+
 mod_keys
 get_mods(void)
 {
+#ifndef __MINGW32__
   inline bool is_key_down(uchar vk) { return GetKeyState(vk) & 0x80; }
+#endif
   lctrl_time = 0;
   bool lctrl = is_key_down(VK_LCONTROL) && (is_lctrl || !is_key_down(VK_RMENU));
   bool super = super_key && is_key_down(super_key);
+#undef hyper  // 'hyper' is #defined as __int64 in Windows RPC headers
   bool hyper = hyper_key && is_key_down(hyper_key);
   return
     is_key_down(VK_SHIFT) * MDK_SHIFT
     | is_key_down(VK_MENU) * MDK_ALT
     | (lctrl | is_key_down(VK_RCONTROL)) * MDK_CTRL
-    | (is_key_down(VK_LWIN) | is_key_down(VK_RWIN)) * MDK_WIN
+    | (is_key_down(VK_LWIN) || is_key_down(VK_RWIN)) * MDK_WIN
     | super * MDK_SUPER
     | hyper * MDK_HYPER
     ;
@@ -2152,6 +2320,26 @@ win_key_nullify(uchar vk)
 
 #define dont_debug_def_keys 1
 
+#ifdef __MINGW32__
+static mod_keys
+tagmods_impl(char * k, mod_keys mod0)
+{
+  mod_keys m = mod0;
+  char * sep = strrchr(k, '+');
+  if (sep)
+    for (; *k && k < sep; k++)
+      switch (*k) {
+        when 'S': m |= MDK_SHIFT;
+        when 'A': m |= MDK_ALT;
+        when 'C': m |= MDK_CTRL;
+        when 'W': m |= MDK_WIN;
+        when 'U': m |= MDK_SUPER;
+        when 'Y': m |= MDK_HYPER;
+      }
+  return m;
+}
+#endif
+
 static int
 pick_key_function(wstring key_commands, char * tag, int n, uint key, mod_keys mods, mod_keys mod0, uint scancode)
 {
@@ -2170,6 +2358,7 @@ pick_key_function(wstring key_commands, char * tag, int n, uint key, mod_keys mo
   // prefixing them to the tag (before calling pick_key_function) but 
   // that would have been more substantial redesign; or the prefix could 
   // be normalized here by sorting; better solution: collect info here
+#ifndef __MINGW32__
   mod_keys tagmods(char * k)
   {
     mod_keys m = mod0;
@@ -2186,6 +2375,9 @@ pick_key_function(wstring key_commands, char * tag, int n, uint key, mod_keys mo
         }
     return m;
   }
+#else
+  #define tagmods(k) tagmods_impl((k), mod0)
+#endif
 
   mod_keys mod_tag = tagmods(tag ?: "");
   char * tag0 = tag ? strchr(tag, '+') : 0;
@@ -2518,6 +2710,485 @@ send_test_vks(bool down, int key)
 
 #endif
 
+#ifdef __MINGW32__
+static char wkd_buf[32];
+static int wkd_len;
+static uint wkd_key;
+static uint wkd_scancode;
+static bool wkd_extended;
+static bool wkd_numlock;
+static uchar wkd_kbd[256];
+static mod_keys wkd_mods;
+static bool wkd_alt;
+static bool wkd_lalt;
+static bool wkd_ralt;
+static bool wkd_altgr;
+static bool wkd_altgr0;
+static bool wkd_ctrl;
+static bool wkd_rctrl;
+static bool wkd_shift;
+static bool wkd_ctrl_lalt_altgr;
+
+static struct {
+  unsigned int combined;
+  unsigned int base;
+  unsigned int spacing;
+} comb_subst[] = {
+#include "combined.t"
+};
+
+static void wkd_ch(char c) { wkd_buf[wkd_len++] = c; }
+static void wkd_esc_if(bool b) { if (b) wkd_ch('\e'); }
+static void wkd_ss3(char c) { wkd_ch('\e'); wkd_ch('O'); wkd_ch(c); }
+static void wkd_csi(char c) { wkd_ch('\e'); wkd_ch('['); wkd_ch(c); }
+static void wkd_mod_csi(char c) { wkd_len = sprintf(wkd_buf, "\e[1;%u%c", wkd_mods + 1, c); }
+static void wkd_mod_ss3(char c) { wkd_mods ? wkd_mod_csi(c) : wkd_ss3(c); }
+static void wkd_tilde_code(uchar code) {
+  trace_key("tilde");
+  wkd_len = sprintf(wkd_buf, wkd_mods ? "\e[%i;%u~" : "\e[%i~", code, wkd_mods + 1);
+}
+static void wkd_other_code(wchar c) {
+  trace_key("other");
+  if (cfg.format_other_keys)
+    // xterm "formatOtherKeys: 1": CSI 64 ; 2 u
+    wkd_len = sprintf(wkd_buf, "\e[%u;%uu", c, wkd_mods + 1);
+  else
+    // xterm "formatOtherKeys: 0": CSI 2 7 ; 2 ; 64 ~
+    wkd_len = sprintf(wkd_buf, "\e[27;%u;%u~", wkd_mods + 1, c);
+}
+static void wkd_mod_appl_xterm(char c) { wkd_len = sprintf(wkd_buf, "\eO%u%c", wkd_mods + 1, c); }
+static void wkd_app_pad_code(char c) {
+  if (wkd_mods && term.app_keypad) switch (wkd_key) {
+    when VK_DIVIDE or VK_MULTIPLY or VK_SUBTRACT or VK_ADD or VK_RETURN:
+      wkd_mod_appl_xterm(c - '0' + 'p');
+      return;
+  }
+  if (term.vt220_keys && wkd_mods && term.app_keypad) switch (wkd_key) {
+    when VK_CLEAR or VK_PRIOR ... VK_DOWN or VK_INSERT or VK_DELETE:
+      wkd_mod_appl_xterm(c - '0' + 'p');
+      return;
+  }
+  wkd_mod_ss3(c - '0' + 'p');
+}
+static void wkd_strcode(string s) {
+  unsigned int code;
+  if (sscanf (s, "%u", & code) == 1)
+    wkd_tilde_code(code);
+  else
+    wkd_len = sprintf(wkd_buf, "%s", s);
+}
+
+static bool wkd_alt_code_key(char digit) {
+  if (old_alt_state > ALT_ALONE) {
+    alt_state = old_alt_state;  // stay in alt_state, process key
+    if (digit >= 0 && digit < alt_state) {
+      alt_code = alt_code * alt_state + digit;
+      if (alt_code < 0 || alt_code > 0x10FFFF) {
+        win_bell(&cfg);
+        alt_state = ALT_NONE;
+      }
+      else
+        win_update(false);
+    }
+    else
+      win_bell(&cfg);
+    return true;
+  }
+  return false;
+}
+
+static bool wkd_alt_code_numpad_key(char digit) {
+  if (old_alt_state == ALT_ALONE) {
+    alt_code = digit;
+    alt_state = digit ? ALT_DEC : ALT_OCT;
+    return true;
+  }
+  return wkd_alt_code_key(digit);
+}
+
+static bool wkd_alt_code_ignore(void) {
+  if (old_alt_state > ALT_ALONE) {
+    alt_state = old_alt_state;  // keep alt_state, ignore key
+    win_bell(&cfg);
+    return true;
+  }
+  else
+    return false;
+}
+
+static bool wkd_app_pad_key(char symbol) {
+  if (wkd_extended)
+    return false;
+  // Mintty-specific: produce app_pad codes not only when vt220 mode is on,
+  // but also in PC-style mode when app_cursor_keys is off, to allow the
+  // numpad keys to be distinguished from the cursor/editing keys.
+  if (term.app_keypad && (!term.app_cursor_keys || term.vt220_keys)) {
+    // If NumLock is on, Shift must have been pressed to override it and
+    // get a VK code for an editing or cursor key code.
+    if (wkd_numlock)
+      wkd_mods |= MDK_SHIFT;
+    wkd_app_pad_code(symbol);
+    return true;
+  }
+  if (symbol == '.')
+    return wkd_alt_code_ignore();
+  else
+    return wkd_alt_code_numpad_key(symbol - '0');
+}
+
+static void wkd_edit_key(uchar code, char symbol) {
+  if (!wkd_app_pad_key(symbol)) {
+    if (code != 3 || wkd_ctrl || wkd_alt || wkd_shift || !term.delete_sends_del)
+      wkd_tilde_code(code);
+    else
+      wkd_ch(CDEL);
+  }
+}
+
+static void wkd_cursor_key(char code, char symbol) {
+  if (term.vt52_mode)
+    wkd_len = sprintf(wkd_buf, "\e%c", code);
+  else if (!wkd_app_pad_key(symbol))
+    wkd_mods ? wkd_mod_csi(code) : term.app_cursor_keys ? wkd_ss3(code) : wkd_csi(code);
+}
+
+static wchar wkd_undead_keycode(void) {
+  wchar wc;
+  int wkd_uc_len = ToUnicode(wkd_key, wkd_scancode, wkd_kbd, &wc, 1, 0);
+#ifdef debug_key
+  printf("undead %02X scn %d -> %d %04X\n", wkd_key, wkd_scancode, wkd_uc_len, wc);
+#endif
+  if (wkd_uc_len < 0) {
+    // Ugly hack to clear dead key state, a la Michael Kaplan.
+    uchar empty_kbd[256];
+    memset(empty_kbd, 0, sizeof empty_kbd);
+    uint wkd_uc_scancode = MapVirtualKey(VK_DECIMAL, 0);
+    wchar dummy;
+    while (ToUnicode(VK_DECIMAL, wkd_uc_scancode, empty_kbd, &dummy, 1, 0) < 0);
+    return wc;
+  }
+  return wkd_uc_len == 1 ? wc : 0;
+}
+
+static void wkd_ctrl_ch(uchar c) {
+  wkd_esc_if(wkd_alt);
+  if (wkd_shift && !cfg.ctrl_exchange_shift) {
+    // Send C1 control char if the charset supports it.
+    // Otherwise prefix the C0 char with ESC.
+    if (c < 0x20) {
+      wchar wc = c | 0x80;
+      int l = cs_wcntombn(wkd_buf + wkd_len, &wc, cs_cur_max, 1);
+      if (l > 0 && wkd_buf[wkd_len] != '?') {
+        wkd_len += l;
+        return;
+      }
+    };
+    wkd_esc_if(!wkd_alt);
+  }
+  wkd_ch(c);
+}
+
+static bool wkd_layout(void) {
+  wchar wbuf[TO_UNICODE_MAX];
+  int wlen = ToUnicode(wkd_key, wkd_scancode, wkd_kbd, wbuf, lengthof(wbuf), 0);
+  trace_alt("layout %d alt %d altgr %d\n", wlen, wkd_alt, wkd_altgr);
+  if (!wlen)     // Unassigned.
+    return false;
+  if (wlen < 0)  // Dead key.
+    return true;
+
+  wkd_esc_if(wkd_alt);
+
+  // Substitute accent compositions not supported by Windows
+  if (wlen == 2)
+    for (unsigned int i = 0; i < lengthof(comb_subst); i++)
+      if (comb_subst[i].spacing == wbuf[0] && comb_subst[i].base == wbuf[1]
+          && comb_subst[i].combined < 0xFFFF  // -> wchar/UTF-16: BMP only
+         ) {
+        wchar wtmp = comb_subst[i].combined;
+        short mblen = cs_wcntombn(wkd_buf + wkd_len, &wtmp, lengthof(wkd_buf) - wkd_len, 1);
+        // short to recognise 0xFFFD as negative (WideCharToMultiByte...?)
+        if (mblen > 0) {
+          wbuf[0] = comb_subst[i].combined;
+          wlen = 1;
+        }
+        break;
+      }
+
+  // Compose characters
+  if (comp_state > 0) {
+#ifdef debug_compose
+    printf("comp (%d)", wlen);
+    for (int i = 0; i < compose_buflen; i++) printf(" %04X", compose_buf[i]);
+    printf(" +");
+    for (int i = 0; i < wlen; i++) printf(" %04X", wbuf[i]);
+    printf("\n");
+#endif
+    for (int i = 0; i < wlen; i++)
+      compose_buf[compose_buflen++] = wbuf[i];
+    win_update(false);
+
+    uint comp_len = min((uint)compose_buflen, lengthof(composed->kc));
+    bool found = false;
+    for (uint k = 0; k < lengthof(composed); k++)
+      if (0 == wcsncmp(compose_buf, composed[k].kc, comp_len)) {
+        if (comp_len < lengthof(composed->kc) && composed[k].kc[comp_len]) {
+          // partial match
+          comp_state = COMP_ACTIVE;
+          return true;
+        }
+        else {
+          // match
+          ///can there be an uncomposed rest in wbuf? should we consider it?
+#ifdef utf8_only
+          ///alpha, UTF-8 only, unchecked...
+          strcpy(wkd_buf + wkd_len, composed[k].s);
+          wkd_len += strlen(composed[k].s);
+          compose_buflen = 0;
+          return true;
+#else
+          wchar * wc = cs__utftowcs(composed[k].s);
+          wlen = 0;
+          while (wc[wlen] && wlen < (int)lengthof(wbuf)) {
+            wbuf[wlen] = wc[wlen];
+            wlen++;
+          }
+          free(wc);
+          found = true;  // fall through, but skip error handling
+#endif
+        }
+      }
+    ///should we deliver compose_buf[] first...?
+    compose_buflen = 0;
+    if (!found) {
+      // unknown compose sequence
+      win_bell(&cfg);
+      // continue without composition
+    }
+  }
+  else
+    compose_buflen = 0;
+
+  // Check that the keycode can be converted to the current charset
+  // before returning success.
+  int mblen = cs_wcntombn(wkd_buf + wkd_len, wbuf, lengthof(wkd_buf) - wkd_len, wlen);
+#ifdef debug_ToUnicode
+  printf("wlen %d:", wlen);
+  for (int i = 0; i < wlen; i ++) printf(" %04X", wbuf[i] & 0xFFFF);
+  printf("\n");
+  printf("mblen %d:", mblen);
+  for (int i = 0; i < mblen; i ++) printf(" %02X", wkd_buf[i] & 0xFF);
+  printf("\n");
+#endif
+  bool ok = mblen > 0;
+  wkd_len = ok ? wkd_len + mblen : 0;
+  return ok;
+}
+
+static void wkd_modify_other_key(void) {
+  wchar wc = wkd_undead_keycode();
+  if (!wc) {
+#ifdef debug_key
+    printf("modf !wc mods %X shft %d\n", wkd_mods, wkd_mods & MDK_SHIFT);
+#endif
+    if (wkd_mods & MDK_SHIFT) {
+      wkd_kbd[VK_SHIFT] = 0;
+      wc = wkd_undead_keycode();
+#ifdef debug_key
+      printf("modf - SHFT -> %04X\n", wc);
+#endif
+    }
+  }
+#ifdef debug_key
+  printf("modf wc %04X (ctrl %d key %02X)\n", wc, wkd_ctrl, wkd_key);
+#endif
+
+  if (!wc && (
+                 (wkd_key >= 'A' && wkd_key <= 'Z')
+              || (wkd_key >= VK_OEM_1 && wkd_key <= VK_OEM_102)
+             )
+     )
+  {
+    // support right-Alt if AltGr unmapped (#1108)
+    // like without modifyOtherKeys mode
+    if (wkd_mods & MDK_CTRL) {
+      // determine non-ASCII letters
+      wkd_kbd[VK_CONTROL] = 0;
+      wc = wkd_undead_keycode();
+#ifdef debug_key
+      printf("modf - CTRL -> %04X\n", wc);
+#endif
+    }
+
+    if (wkd_altgr) {
+      // turn AltGr into Alt
+      wkd_mods |= MDK_ALT;
+      wkd_altgr = false;
+    }
+  }
+
+  if (wc) {
+    if (wkd_altgr && !is_key_down(VK_LMENU))
+      wkd_mods &= ~ MDK_ALT;
+    if (!wkd_altgr && (wkd_mods == MDK_CTRL) && wc > '~' && wkd_key <= 'Z') {
+      // report control char on non-latin keyboard layout
+      wkd_other_code(wkd_key);
+    }
+    else
+      wkd_other_code(wc);
+  }
+}
+
+static bool wkd_char_key(void) {
+  wkd_alt = wkd_lalt & !wkd_ctrl_lalt_altgr;
+  trace_alt("char_key alt %d (l %d r %d altgr %d)\n", wkd_alt, wkd_lalt, wkd_ralt, wkd_altgr);
+
+  // Sync keyboard layout with our idea of AltGr.
+  wkd_kbd[VK_CONTROL] = wkd_altgr ? 0x80 : 0;
+
+  // Don't handle Ctrl combinations here.
+  // Need to check there's a Ctrl that isn't part of Ctrl+LeftAlt==AltGr.
+  if ((wkd_ctrl & !wkd_ctrl_lalt_altgr) | (lctrl & wkd_rctrl))
+    return false;
+
+  // Try the layout.
+  if (wkd_layout())
+    return true;
+
+  // This prevents AltGr from behaving like Alt in modify_other_keys mode.
+  if (!cfg.altgr_is_alt && wkd_altgr0)
+    return false;
+
+  if (wkd_ralt) {
+    // Try with RightAlt/AltGr key treated as Alt.
+    wkd_kbd[VK_CONTROL] = 0;
+    trace_alt("char_key ralt; alt = true\n");
+    wkd_alt = true;
+    wkd_layout();
+    return true;
+  }
+  return !wkd_ctrl;
+}
+
+static bool wkd_altgr_key(void) {
+  trace_alt("altgr_key altgr %d alt %d -> %d\n", wkd_altgr, wkd_alt, wkd_lalt & !wkd_ctrl_lalt_altgr);
+  if (!wkd_altgr)
+    return false;
+
+  wkd_alt = wkd_lalt & !wkd_ctrl_lalt_altgr;
+
+  // Sync keyboard layout with our idea of AltGr.
+  wkd_kbd[VK_CONTROL] = wkd_altgr ? 0x80 : 0;
+
+  // Don't handle Ctrl combinations here.
+  // Need to check there's a Ctrl that isn't part of Ctrl+LeftAlt==AltGr.
+  if ((wkd_ctrl & !wkd_ctrl_lalt_altgr) | (lctrl & wkd_rctrl))
+    return false;
+
+  trace_alt("altgr_key -> layout alt %d\n", wkd_alt);
+
+  // Try the layout.
+  return wkd_layout();
+}
+
+static bool wkd_try_appctrl(wchar wc) {
+  switch (wc) {
+    when '@' or '[' ... '_' or 'a' ... 'z':
+      if (term.app_control & (1 << (wc & 0x1F))) {
+        wkd_mods = wkd_ctrl * MDK_CTRL;
+        wkd_other_code((wc & 0x1F) + '@');
+        return true;
+      }
+  }
+  return false;
+}
+
+static bool wkd_try_key(void) {
+  wchar wc = wkd_undead_keycode();  // should we fold that out into ctrl_key?
+
+  if (wkd_try_appctrl(wc))
+    return true;
+
+  char c;
+  switch (wc) {
+    when '@' or '[' ... '_' or 'a' ... 'z': c = CTRL(wc);
+    when '/': c = CTRL('_');
+    when '?': c = CDEL;
+    otherwise: return false;
+  }
+  wkd_ctrl_ch(c);
+  return true;
+}
+
+static bool wkd_try_shifts(void) {
+  wkd_shift = is_key_down(VK_LSHIFT) && is_key_down(VK_RSHIFT);
+  if (wkd_try_key())
+    return true;
+  wkd_shift = is_key_down(VK_SHIFT);
+  if (wkd_shift || (wkd_key >= '0' && wkd_key <= '9' && !term.modify_other_keys)) {
+    wkd_kbd[VK_SHIFT] ^= 0x80;
+    if (wkd_try_key())
+      return true;
+    wkd_kbd[VK_SHIFT] ^= 0x80;
+  }
+  return false;
+}
+
+static bool wkd_ctrl_key(void) {
+  if (wkd_try_shifts())
+    return true;
+  if (wkd_altgr) {
+    // Try with AltGr treated as Alt.
+    wkd_kbd[VK_CONTROL] = 0;
+    trace_alt("ctrl_key altgr alt = true\n");
+    wkd_alt = true;
+    return wkd_try_shifts();
+  }
+  return false;
+}
+
+static bool wkd_zoom_hotkey(void) {
+  if (!term.shortcut_override && cfg.zoom_shortcuts
+      && (wkd_mods & ~MDK_SHIFT) == MDK_CTRL) {
+    int zoom;
+    switch (wkd_key) {
+      // numeric keypad keys:
+      // -- handle these ahead, see above
+      //when VK_SUBTRACT:  zoom = -1;
+      //when VK_ADD:       zoom = 1;
+      //when VK_NUMPAD0:   zoom = 0;
+        // Shift+VK_NUMPAD0 would be VK_INSERT but don't mangle that!
+      // normal keys:
+      // -- handle these in the course of layout() and other checking,
+      // -- so handle the case that something is assigned to them
+      // -- e.g. Ctrl+Shift+- -> Ctrl+_
+      // -- or even a custom Ctrl+- mapping
+      // depending on keyboard layout, these may already be shifted!
+      // thus better ignore the shift state, at least for -/+
+      when VK_OEM_MINUS: zoom = -1; wkd_mods &= ~MDK_SHIFT;
+      when VK_OEM_PLUS:  zoom = 1; wkd_mods &= ~MDK_SHIFT;
+      when '0':          zoom = 0;
+      otherwise: return false;
+    }
+    win_zoom_font(zoom, wkd_mods & MDK_SHIFT);
+    return true;
+  }
+  return false;
+}
+
+static bool wkd_vk_special(string key_mapped) {
+  if (!* key_mapped) {
+    if (!wkd_layout())
+      return false;
+  }
+  else if ((key_mapped[0] & ~037) == 0 && key_mapped[1] == 0)
+    wkd_ctrl_ch(key_mapped[0]);
+  else
+    wkd_strcode(key_mapped);
+  return true;
+}
+#endif  /* __MINGW32__ */
+
 bool
 win_key_down(WPARAM wp, LPARAM lp)
 {
@@ -2586,7 +3257,11 @@ static LONG last_key_time = 0;
 
   uchar kbd[256];
   GetKeyboardState(kbd);
+#ifdef __MINGW32__
+  #define is_key_down(vk) (kbd[vk] & 0x80)
+#else
   inline bool is_key_down(uchar vk) { return kbd[vk] & 0x80; }
+#endif
 #ifdef debug_virtual_key_codes
   printf("-- [%u %c%u] Shift %d:%d/%d Ctrl %d:%d/%d Alt %d:%d/%d\n",
          (int)GetMessageTime(), lctrl_time ? '+' : '=', (int)GetMessageTime() - lctrl_time,
@@ -2737,6 +3412,7 @@ C	M	+C	+A	"	"
                 | win * MDK_WIN
                 ;
   bool super = super_key && is_key_down(super_key);
+#undef hyper  // 'hyper' is #defined as __int64 in Windows RPC headers
   bool hyper = hyper_key && is_key_down(hyper_key);
   mods |= super * MDK_SUPER | hyper * MDK_HYPER;
   mods_debug = mods
@@ -3240,6 +3916,7 @@ C	M	+C	+A	"	"
   // them anyway during user-defined key detection (using the '*' prefix)
   //mods |= super * MDK_SUPER | hyper * MDK_HYPER;
 
+#ifndef __MINGW32__
   bool zoom_hotkey(void) {
     if (!term.shortcut_override && cfg.zoom_shortcuts
         && (mods & ~MDK_SHIFT) == MDK_CTRL) {
@@ -3268,11 +3945,74 @@ C	M	+C	+A	"	"
     }
     return false;
   }
+#endif  /* __MINGW32__ */
 
   // Keycode buffers
+#ifndef __MINGW32__
   char buf[32];
   int len = 0;
+#else
+  wkd_key = key;
+  wkd_scancode = scancode;
+  wkd_extended = extended;
+  wkd_numlock = numlock;
+  memcpy(wkd_kbd, kbd, sizeof(kbd));
+  wkd_mods = mods;
+  wkd_alt = alt;
+  wkd_lalt = lalt;
+  wkd_ralt = ralt;
+  wkd_altgr = altgr;
+  wkd_altgr0 = altgr0;
+  wkd_ctrl = ctrl;
+  wkd_rctrl = rctrl;
+  wkd_shift = shift;
+  wkd_ctrl_lalt_altgr = ctrl_lalt_altgr;
+  wkd_len = 0;
+# define buf      wkd_buf
+# define len      wkd_len
+# define key      wkd_key
+# define scancode wkd_scancode
+# define extended wkd_extended
+# define numlock  wkd_numlock
+# define kbd      wkd_kbd
+# define mods     wkd_mods
+# define alt      wkd_alt
+# define lalt     wkd_lalt
+# define ralt     wkd_ralt
+# define altgr    wkd_altgr
+# define altgr0   wkd_altgr0
+# define ctrl     wkd_ctrl
+# define rctrl    wkd_rctrl
+# define shift    wkd_shift
+# define ctrl_lalt_altgr wkd_ctrl_lalt_altgr
+# define zoom_hotkey      wkd_zoom_hotkey
+# define ch               wkd_ch
+# define esc_if           wkd_esc_if
+# define ss3              wkd_ss3
+# define csi              wkd_csi
+# define mod_csi          wkd_mod_csi
+# define mod_ss3          wkd_mod_ss3
+# define tilde_code       wkd_tilde_code
+# define other_code       wkd_other_code
+# define app_pad_code     wkd_app_pad_code
+# define strcode          wkd_strcode
+# define alt_code_key     wkd_alt_code_key
+# define alt_code_numpad_key wkd_alt_code_numpad_key
+# define alt_code_ignore  wkd_alt_code_ignore
+# define app_pad_key      wkd_app_pad_key
+# define edit_key         wkd_edit_key
+# define cursor_key       wkd_cursor_key
+# define undead_keycode   wkd_undead_keycode
+# define modify_other_key wkd_modify_other_key
+# define char_key         wkd_char_key
+# define altgr_key        wkd_altgr_key
+# define ctrl_ch          wkd_ctrl_ch
+# define ctrl_key         wkd_ctrl_key
+# define vk_special       wkd_vk_special
+# define layout           wkd_layout
+#endif  /* __MINGW32__ */
 
+#ifndef __MINGW32__
   inline void ch(char c) { buf[len++] = c; }
   inline void esc_if(bool b) { if (b) ch('\e'); }
   void ss3(char c) { ch('\e'); ch('O'); ch(c); }
@@ -3395,6 +4135,7 @@ C	M	+C	+A	"	"
       mods ? mod_csi(code) : term.app_cursor_keys ? ss3(code) : csi(code);
   }
 
+#ifndef __MINGW32__
 static struct {
   unsigned int combined;
   unsigned int base;
@@ -3402,6 +4143,7 @@ static struct {
 } comb_subst[] = {
 #include "combined.t"
 };
+#endif  /* __MINGW32__ */
 
   // Keyboard layout
   bool layout(void) {
@@ -3710,6 +4452,7 @@ static struct {
       strcode(key_mapped);
     return true;
   }
+#endif  /* __MINGW32__ */
 
   switch (key) {
     when VK_RETURN:
@@ -3815,7 +4558,7 @@ static struct {
         ? ss3('[')
         : ctrl_ch(term.escape_sends_fs ? CTRL('\\') : CTRL('['));
     when VK_PAUSE:
-      if (!vk_special(ctrl & !extended ? cfg.key_break : cfg.key_pause))
+      if (!vk_special(ctrl && !extended ? cfg.key_break : cfg.key_pause))
         // default cfg.key_pause is CTRL(']')
         return false;
     when VK_CANCEL:
@@ -4000,15 +4743,66 @@ static struct {
   else if (comp_state == COMP_PENDING)
     comp_state = COMP_ACTIVE;
 
+#ifdef __MINGW32__
+# undef buf
+# undef len
+# undef key
+# undef scancode
+# undef extended
+# undef numlock
+# undef kbd
+# undef mods
+# undef alt
+# undef lalt
+# undef ralt
+# undef altgr
+# undef altgr0
+# undef ctrl
+# undef rctrl
+# undef shift
+# undef ctrl_lalt_altgr
+# undef zoom_hotkey
+# undef ch
+# undef esc_if
+# undef ss3
+# undef csi
+# undef mod_csi
+# undef mod_ss3
+# undef tilde_code
+# undef other_code
+# undef app_pad_code
+# undef strcode
+# undef alt_code_key
+# undef alt_code_numpad_key
+# undef alt_code_ignore
+# undef app_pad_key
+# undef edit_key
+# undef cursor_key
+# undef undead_keycode
+# undef modify_other_key
+# undef char_key
+# undef altgr_key
+# undef ctrl_ch
+# undef ctrl_key
+# undef vk_special
+#endif  /* __MINGW32__ */
+
   return true;
 }
+
+#ifdef __MINGW32__
+#undef is_key_down
+#endif
 
 void
 win_csi_seq(char * pre, char * suf)
 {
   mod_keys mods = get_mods();
+#ifndef __MINGW32__
   inline bool is_key_down(uchar vk) { return GetKeyState(vk) & 0x80; }
+#endif
   bool super = super_key && is_key_down(super_key);
+#undef hyper  // 'hyper' is #defined as __int64 in Windows RPC headers
   bool hyper = hyper_key && is_key_down(hyper_key);
   mods |= super * MDK_SUPER | hyper * MDK_HYPER;
 
@@ -4021,7 +4815,9 @@ win_csi_seq(char * pre, char * suf)
 bool
 win_key_up(WPARAM wp, LPARAM lp)
 {
+#ifndef __MINGW32__
   inline bool is_key_down(uchar vk) { return GetKeyState(vk) & 0x80; }
+#endif
 
   uint key = wp;
 #ifdef debug_virtual_key_codes

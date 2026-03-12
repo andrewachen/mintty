@@ -17,12 +17,13 @@
 #include "base64.h"
 #include "unicodever.t"
 
+#ifndef __MINGW32__
 #include <termios.h>
 #include <sys/time.h>
 #if CYGWIN_VERSION_API_MINOR >= 74
 #include <langinfo.h>  // nl_langinfo, CODESET
 #endif
-
+#endif
 
 #define TERM_CMD_BUF_INC_STEP 128
 //#define TERM_CMD_BUF_MAX_SIZE (1024 * 1024)
@@ -982,6 +983,42 @@ static int last_width = 0;
 cattr last_attr = {.attr = ATTR_DEFAULT,
                    .truefg = 0, .truebg = 0, .ulcolr = (colour)-1};
 
+#ifdef __MINGW32__
+static wchar
+last_comb(termline *line, int col) {
+  while (line->chars[col].cc_next)
+    col += line->chars[col].cc_next;
+  return line->chars[col].chr;
+}
+
+static void
+put_char_(wchar c, term_cursor *curs, termline *line)
+{
+  if (term.ring_enabled && curs->x == term.marg_right + 1 - 8) {
+    win_margin_bell(&cfg);
+    term.ring_enabled = false;
+  }
+
+  clear_cc(line, curs->x);
+  line->chars[curs->x].chr = c;
+  line->chars[curs->x].attr = curs->attr;
+#ifdef insufficient_approach
+#warning this does not help when scrolling via rectangular copy
+  if (term.lrmargmode)
+    line->lattr &= ~LATTR_MODE;
+#endif
+  if (term.curs.rewrap_on_resize)
+    line->lattr |= LATTR_REWRAP;
+  else
+    line->lattr &= ~LATTR_REWRAP;
+  if (!(line->lattr & LATTR_WRAPCONTD))
+    line->lattr = (line->lattr & ~LATTR_BIDIMASK) | curs->bidimode;
+  //TODO: if changed, propagate mode onto paragraph
+  if (cfg.ligatures_support)
+    term_invalidate(0, curs->y, curs->x, curs->y);
+}
+#endif
+
 void
 write_char(wchar c, int width)
 {
@@ -1012,6 +1049,7 @@ write_char(wchar c, int width)
   last_char = c;
   last_attr = curs->attr;
 
+#ifndef __MINGW32__
   void put_char(wchar c)
   {
     if (term.ring_enabled && curs->x == term.marg_right + 1 - 8) {
@@ -1037,6 +1075,9 @@ write_char(wchar c, int width)
     if (cfg.ligatures_support)
       term_invalidate(0, curs->y, curs->x, curs->y);
   }
+#else
+# define put_char(c) put_char_((c), curs, line)
+#endif
 
   // check for Arabic Lam/Alef single-cell joining
   if (term.join_lam_alef &&
@@ -1222,11 +1263,13 @@ write_char(wchar c, int width)
           else
             line->chars[x].attr.attr &= ~TATTR_EMOJI;
 
+#ifndef __MINGW32__
           wchar last_comb(termline *line, int col) {
             while (line->chars[col].cc_next)
               col += line->chars[col].cc_next;
             return line->chars[col].chr;
           }
+#endif
           bool is_fitzpatrick = false;
 
          /* Tune Fitzpatrick colour on non-emojis */
@@ -1329,6 +1372,9 @@ write_char(wchar c, int width)
     if (term.autowrap || cfg.old_wrapmodes)
       curs->wrapnext = true;
   }
+#ifdef __MINGW32__
+# undef put_char
+#endif
 }
 
 #define dont_debug_scriptfonts
@@ -1897,6 +1943,18 @@ lookup_cset(ushort nrc_code, uchar csmask, bool enabled)
 static uchar esc_mod0 = 0;
 static uchar esc_mod1 = 0;
 
+#ifdef __MINGW32__
+static void
+check_designa_(uchar *csmask_p, int *gi_p, uchar designator, char * designa, uchar cstype)
+{
+  char * csdesigna = strchr(designa, designator);
+  if (csdesigna) {
+    *csmask_p = cstype;
+    *gi_p = csdesigna - designa + cstype - 1;
+  }
+}
+#endif
+
 static void
 do_esc(uchar c)
 {
@@ -1914,6 +1972,7 @@ do_esc(uchar c)
   uchar csmask = 0;
   int gi;
   if (designator) {
+#ifndef __MINGW32__
     void check_designa(char * designa, uchar cstype) {
       char * csdesigna = strchr(designa, designator);
       if (csdesigna) {
@@ -1921,8 +1980,14 @@ do_esc(uchar c)
         gi = csdesigna - designa + cstype - 1;
       }
     }
+#else
+# define check_designa(d, t) check_designa_(&csmask, &gi, designator, (d), (t))
+#endif
     check_designa("()*+", 1);  // 94-character set designation?
     check_designa("-./", 2);  // 96-character set designation?
+#ifdef __MINGW32__
+# undef check_designa
+#endif
   }
   if (csmask) {
     ushort nrc_code = CPAIR(esc_mod1, c);
@@ -3098,6 +3163,30 @@ set_taskbar_progress(int state, int percent)
   }
 }
 
+#ifdef __MINGW32__
+static void
+set_push_(cattrflags *caflagsmask, int attr)
+{
+  switch (attr) {
+    when 1: *caflagsmask |= ATTR_BOLD | ATTR_SHADOW;
+    when 2: *caflagsmask |= ATTR_DIM;
+    when 3: *caflagsmask |= ATTR_ITALIC;
+    when 4 or 21: *caflagsmask |= UNDER_MASK;
+    when 5 or 6: *caflagsmask |= ATTR_BLINK | ATTR_BLINK2;
+    when 7: *caflagsmask |= ATTR_REVERSE;
+    when 8: *caflagsmask |= ATTR_INVISIBLE | ATTR_OVERSTRIKE;
+    when 9: *caflagsmask |= ATTR_STRIKEOUT;
+    when 20: *caflagsmask |= FONTFAM_MASK;
+    when 53: *caflagsmask |= ATTR_OVERL;
+    when 58: *caflagsmask |= ATTR_ULCOLOUR;
+    when 30 or 10: *caflagsmask |= ATTR_FGMASK;
+    when 31 or 11: *caflagsmask |= ATTR_BGMASK;
+    when 73: *caflagsmask |= ATTR_SUPERSCR;
+    when 74: *caflagsmask |= ATTR_SUBSCR;
+  }
+}
+#endif
+
 static void
 do_csi(uchar c)
 {
@@ -3260,6 +3349,7 @@ do_csi(uchar c)
       cattr ca = term.curs.attr;
       cattrflags caflagsmask = 0;
 
+#ifndef __MINGW32__
       void set_push(int attr) {
         switch (attr) {
           when 1: caflagsmask |= ATTR_BOLD | ATTR_SHADOW;
@@ -3279,6 +3369,9 @@ do_csi(uchar c)
           when 74: caflagsmask |= ATTR_SUBSCR;
         }
       }
+#else
+# define set_push(attr) set_push_(&caflagsmask, (attr))
+#endif
 
       if (!term.csi_argv_defined[0])
         for (int a = 1; a < 90; a++)
@@ -3297,6 +3390,9 @@ do_csi(uchar c)
       // push
       //printf("XTPUSHSGR &%llX %llX %06X %06X %06X\n", caflagsmask, ca.attr, ca.truefg, ca.truebg, ca.ulcolr);
       push_attrs(ca, caflagsmask);
+#ifdef __MINGW32__
+# undef set_push
+#endif
     }
     when CPAIR('#', '}') or CPAIR('#', 'q'): { /* Pop video attributes from stack (XTPOPSGR) */
       //printf("XTPOPSGR\n");
@@ -4671,6 +4767,34 @@ respond_capabilities(void)
 /*
  * Process OSC command sequences.
  */
+
+#ifdef __MINGW32__
+typedef struct {
+  char * p;
+  int v;
+} paramap;
+
+static int
+scanenum(char * s, int * _i, paramap * p, bool donum)
+{
+  char * sep = strchr(s, ';');
+  int len = sep ? (uint)(sep - s) : strlen(s);
+  while (p->p) {
+    if (0 == strncasecmp(s, p->p, len)) {
+      *_i = p->v;
+      return len;
+    }
+    p++;
+  }
+  if (donum) {
+    int numlen = sscanf(s, "%d", _i);
+    if (numlen && numlen == len)
+      return numlen;
+  }
+  return 0;
+}
+#endif
+
 static void
 do_cmd(void)
 {
@@ -5153,6 +5277,7 @@ do_cmd(void)
       win_sound(s, opt);
     }
     when 9: {
+#ifndef __MINGW32__
 typedef struct {
   char * p;
   int v;
@@ -5176,6 +5301,7 @@ typedef struct {
         // not found
         return 0;
       }
+#endif
 
       int cmd;
       int len = scanenum(s, &cmd,
@@ -5239,6 +5365,19 @@ term_print_finish(void)
     term.printing = term.only_printing = false;
   }
 }
+
+#ifdef __MINGW32__
+static wchar
+NRC_(wchar * map, uchar c, wchar wc)
+{
+  static char * rpl = "#@[\\]^_`{|}~";
+  char * match = strchr(rpl, c);
+  if (match)
+    return map[match - rpl];
+  else
+    return wc;
+}
+#endif
 
 static void
 term_do_write(const char *buf, uint len, bool fix_status)
@@ -5447,6 +5586,7 @@ term_do_write(const char *buf, uint len, bool fix_status)
         }
 
         // NRCS matching function
+#ifndef __MINGW32__
         wchar NRC(wchar * map)
         {
           static char * rpl = "#@[\\]^_`{|}~";
@@ -5456,6 +5596,9 @@ term_do_write(const char *buf, uint len, bool fix_status)
           else
             return wc;
         }
+#else
+# define NRC(map) NRC_((map), c, wc)
+#endif
 
         cattrflags asav = term.curs.attr.attr;
 
@@ -5702,6 +5845,9 @@ term_do_write(const char *buf, uint len, bool fix_status)
         // Finally, write it and restore cursor attribute
         write_ucschar(0, wc, width);
         term.curs.attr.attr = asav;
+#ifdef __MINGW32__
+# undef NRC
+#endif
       } // end term_write switch (term.state) when NORMAL
 
       when VT52_Y:

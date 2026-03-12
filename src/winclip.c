@@ -1087,6 +1087,34 @@ buf_add(char c)
   buf[buf_pos++] = c;
 }
 
+#ifdef __MINGW32__
+static char *
+mount_point(char * path, char * appd)
+{
+  if (!appd)
+    return null;
+  int lapp = strlen(appd);
+  if (strncmp(path, appd, lapp) != 0)
+    return null;
+  path += strlen(appd);
+  if (!ispathprefix("lxss", path))
+    return null;
+  path += 5;
+  for (uint i = 0; i < lengthof(lxss_mounts); i++) {
+    if (ispathprefix(lxss_mounts[i].p, path))
+      return path;
+  }
+  if (ispathprefix("rootfs", path)) {
+    path += 7;
+    if (*path)
+      return path;
+    else
+      return "/";
+  }
+  return null;
+}
+#endif  /* __MINGW32__: mount_point */
+
 static void
 buf_path(wchar * wfn, bool convert, bool quote)
 {
@@ -1154,6 +1182,7 @@ buf_path(wchar * wfn, bool convert, bool quote)
           free(wappd);
         }
 
+#ifndef __MINGW32__
         char * mount_point(char * path, char * appd) {
           if (!appd)
             return null;
@@ -1185,6 +1214,7 @@ buf_path(wchar * wfn, bool convert, bool quote)
           }
           return null;
         }
+#endif  /* !__MINGW32__: mount_point */
 
         char * mp = mount_point(p, appd);
         if (mp)
@@ -1215,6 +1245,23 @@ buf_path(wchar * wfn, bool convert, bool quote)
     free(fn);
 }
 
+#ifdef __MINGW32__
+static void
+bufpaths_(uint n, HDROP drop, bool convert, bool quote)
+{
+  buf_init();
+  for (uint i = 0; i < n; i++) {
+    uint wfn_len = DragQueryFileW(drop, i, 0, 0);
+    wchar wfn[wfn_len + 1];
+    DragQueryFileW(drop, i, wfn, wfn_len + 1);
+    if (i)
+      buf_add(' ');
+    buf_path(wfn, convert, quote);
+  }
+  buf[buf_pos] = 0;
+}
+#endif  /* __MINGW32__: bufpaths_ */
+
 static void
 paste_hdrop(HDROP drop)
 {
@@ -1224,6 +1271,7 @@ paste_hdrop(HDROP drop)
 #endif
   uint n = DragQueryFileW(drop, -1, 0, 0);
 
+#ifndef __MINGW32__
   void bufpaths(bool convert, bool quote) {
     buf_init();
     for (uint i = 0; i < n; i++) {
@@ -1239,6 +1287,9 @@ paste_hdrop(HDROP drop)
     }
     buf[buf_pos] = 0;
   }
+#else
+  #define bufpaths(conv, quot) bufpaths_(n, drop, (conv), (quot))
+#endif  /* !__MINGW32__: bufpaths */
 
   if (!support_wsl && *cfg.drop_commands) {
     // try to determine foreground program
@@ -1282,6 +1333,9 @@ paste_hdrop(HDROP drop)
   free(buf);
   if (term.bracketed_paste)
     child_write("\e[201~", 6);
+#ifdef __MINGW32__
+  #undef bufpaths
+#endif
 }
 
 static void

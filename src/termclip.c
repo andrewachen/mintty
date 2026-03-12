@@ -294,47 +294,49 @@ term_open(void)
 static bool filter_NUL;
 static char filter[69];
 
+static bool
+do_filter(string s, string tag)
+{
+#if CYGWIN_VERSION_API_MINOR >= 171
+  char * match = strcasestr(s, tag);
+#else
+  char * match = strstr(s, tag);
+#endif
+  //return match;  // a bit simplistic, we should probably properly parse...
+  if (!match)
+    return false;
+  return (match == s || *(match - 1) < '@')
+         && match[strlen(tag)] < '@';
+}
+
 static void
 set_filter(string s)
 {
-  bool do_filter(string tag)
-  {
-#if CYGWIN_VERSION_API_MINOR >= 171
-    char * match = strcasestr(s, tag);
-#else
-    char * match = strstr(s, tag);
-#endif
-    //return match;  // a bit simplistic, we should probably properly parse...
-    if (!match)
-      return false;
-    return (match == s || *(match - 1) < '@')
-           && match[strlen(tag)] < '@';
-  }
-
   filter_NUL = false;
   *filter = 0;
-  if (do_filter("C0")) {
+  if (do_filter(s, "C0")) {
     filter_NUL = true;
     strcat(filter, "\t\n\r");
   }
   else {
-    if (do_filter("BS")) strcat(filter, "\b");
-    if (do_filter("HT")) strcat(filter, "\t");
-    if (do_filter("NL")) strcat(filter, "\n");
-    if (do_filter("CR")) strcat(filter, "\r");
-    if (do_filter("FF")) strcat(filter, "\f");
-    if (do_filter("ESC")) strcat(filter, "\e");
+    if (do_filter(s, "BS")) strcat(filter, "\b");
+    if (do_filter(s, "HT")) strcat(filter, "\t");
+    if (do_filter(s, "NL")) strcat(filter, "\n");
+    if (do_filter(s, "CR")) strcat(filter, "\r");
+    if (do_filter(s, "FF")) strcat(filter, "\f");
+    if (do_filter(s, "ESC")) strcat(filter, "\e");
   }
-  if (do_filter("DEL"))
+  if (do_filter(s, "DEL"))
     strcat(filter, "\177");
-  if (do_filter("C1")) {
+  if (do_filter(s, "C1")) {
     filter_NUL = true;
     strcat(filter, "\200\201\202\203\204\205\206\207"
                    "\210\211\212\213\214\215\216\217"
                    "\220\221\222\223\224\225\226\227"
                    "\230\231\232\233\234\235\236\237");
   }
-  if (do_filter("STTY")) {
+#ifndef __MINGW32__
+  if (do_filter(s, "STTY")) {
     int i = strlen(filter);
     void addchar(wchar c)
     {
@@ -350,6 +352,7 @@ set_filter(string s)
     addchar(c_cc[VSWTC]);
     filter[i] = 0;
   }
+#endif
 }
 
 static bool
@@ -651,9 +654,36 @@ term_cmd(char * cmd)
 }
 
 #include <time.h>
+#ifndef __MINGW32__
 #include <sys/time.h>
+#endif
 #include <fcntl.h>
 #include "winpriv.h"  // PADDING
+
+#ifdef __MINGW32__
+static char *tc_hbuf;
+static size_t tc_hbuf_len, tc_hbuf_cap;
+static void
+tc_hprintf(FILE * hf, const char * fmt, ...)
+{
+  char * buf;
+  va_list va;
+  va_start(va, fmt);
+  int len = vasprintf(&buf, fmt, va);
+  va_end(va);
+  if (hf)
+    fprintf(hf, "%s", buf);
+  else {
+    if (tc_hbuf_len + len > tc_hbuf_cap) {
+      tc_hbuf_cap = tc_hbuf_cap ? tc_hbuf_cap * 5 / 4 : 5555;
+      tc_hbuf = renewn(tc_hbuf, tc_hbuf_cap + 1);
+    }
+    strcpy(tc_hbuf + tc_hbuf_len, buf);
+    tc_hbuf_len += len;
+  }
+  free(buf);
+}
+#endif  /* __MINGW32__ */
 
 static char *
 term_create_html(bool all, FILE * hf, int level)
@@ -661,6 +691,7 @@ term_create_html(bool all, FILE * hf, int level)
   char * hbuf = hf ? 0 : strdup("");
   size_t hbuf_len = 0;
   size_t hbuf_cap = 0;
+#ifndef __MINGW32__
   void
   hprintf(FILE * hf, const char * fmt, ...)
   {
@@ -683,6 +714,12 @@ term_create_html(bool all, FILE * hf, int level)
     }
     free(buf);
   }
+#else
+  tc_hbuf = hbuf;
+  tc_hbuf_len = hbuf_len;
+  tc_hbuf_cap = hbuf_cap;
+# define hprintf(hf_, ...) tc_hprintf((hf_), __VA_ARGS__)
+#endif
 
   pos start = term.sel_start;
   pos end = term.sel_end;
@@ -985,6 +1022,22 @@ term_create_html(bool all, FILE * hf, int level)
 
       // style adding function
       bool with_style = false;
+#ifdef __MINGW32__
+      #define add_style(s) do { \
+        if (!with_style) { \
+          hprintf(hf, "' style='%s", (s)); \
+          with_style = true; \
+        } else { \
+          hprintf(hf, " %s", (s)); \
+        } \
+      } while(0)
+      #define add_color(pre, col) do { \
+        colour _ansii = win_get_colour(ANSI0 + (col)); \
+        uchar _r = red(_ansii), _g = green(_ansii), _b = blue(_ansii); \
+        add_style(""); \
+        hprintf(hf, "%scolor: #%02X%02X%02X;", (pre), _r, _g, _b); \
+      } while(0)
+#else
       void add_style(char * s) {
         if (!with_style) {
           hprintf(hf, "' style='%s", s);
@@ -999,6 +1052,7 @@ term_create_html(bool all, FILE * hf, int level)
         add_style("");
         hprintf(hf, "%scolor: #%02X%02X%02X;", pre, r, g, b);
       }
+#endif
 
       // add style classes or resolved styles;
       // explicit style= attributes instead of xterm-compatible classes
@@ -1183,6 +1237,15 @@ term_create_html(bool all, FILE * hf, int level)
       // * scale width to actual (narrow or multi-cell) width
 
       // write chunk, apply HTML escapes
+#ifdef __MINGW32__
+      #define hprinttext(t) do { \
+        char *_ht = (t); \
+        if ((ca)->attr & ATTR_FRAMED) \
+          while (*_ht) hprintf(hf, "%c", *_ht++); \
+        else \
+          hprintf(hf, "%s", _ht); \
+      } while(0)
+#else
       void hprinttext(char * t) {
         if (ca->attr & ATTR_FRAMED)
           while (*t) {
@@ -1199,6 +1262,7 @@ term_create_html(bool all, FILE * hf, int level)
         else
           hprintf(hf, "%s", t);
       }
+#endif
       char * s1 = strpbrk(s, "<&");
       if (s1) {
         char * s0 = s;
@@ -1256,6 +1320,11 @@ term_create_html(bool all, FILE * hf, int level)
       lattr = LATTR_NORM;
     }
   }
+#ifdef __MINGW32__
+  #undef add_style
+  #undef add_color
+  #undef hprinttext
+#endif
   destroy_clip_workbuf(buf, true);
 
   hprintf(hf, "</pre>\n");
@@ -1263,6 +1332,10 @@ term_create_html(bool all, FILE * hf, int level)
   //hprintf(hf, "  </td></tr></table>\n");
   hprintf(hf, "</body>\n");
 
+#ifdef __MINGW32__
+  hbuf = tc_hbuf;
+# undef hprintf
+#endif
   return hbuf;
 }
 
@@ -1275,8 +1348,10 @@ term_get_html(int level)
 void
 term_export_html(bool all, bool do_open)
 {
+#ifndef __MINGW32__
   struct timeval now;
   gettimeofday(& now, 0);
+#endif
   char * htmlf = save_filename(".html");
 
   int hfd = open(htmlf, O_WRONLY | O_CREAT | O_EXCL, 0600);

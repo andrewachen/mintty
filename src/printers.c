@@ -14,7 +14,11 @@
 #define PRINFTYPE   4
 static PRINTER_INFO_4W * printer_info = null;
 #else
+#ifndef __MINGW32__
 #include <w32api/winreg.h>
+#else
+#include <winreg.h>
+#endif
 #include <wchar.h>
 static struct printer_info {
   wchar * pPrinterName;

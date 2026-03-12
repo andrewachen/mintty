@@ -55,7 +55,7 @@ static struct winsize prev_winsize = {0, 0, 0, 0};
 static struct winsize prev_winsize;
 #endif
 
-#if CYGWIN_VERSION_API_MINOR >= 66
+#if CYGWIN_VERSION_API_MINOR >= 66 && !defined(__MINGW32__)
 #include <langinfo.h>
 #endif
 

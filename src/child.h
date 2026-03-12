@@ -1,7 +1,11 @@
 #ifndef CHILD_H
 #define CHILD_H
 
+#ifdef __MINGW32__
+#include "compat_mingw.h"
+#else
 #include <termios.h>
+#endif
 
 extern string child_dir;
 
