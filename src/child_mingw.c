@@ -1,60 +1,268 @@
-// ABOUTME: MinGW/CLANGARM64 stub replacement for child.c — all child process functions are no-ops
-// ABOUTME: Compiled instead of child.c on CLANGARM64; ConPTY integration deferred to a future phase
+// ABOUTME: MinGW/CLANGARM64 child process implementation using Windows ConPTY API
+// ABOUTME: Compiled instead of child.c on CLANGARM64; spawns child via CreatePseudoConsole
 
 #include "child.h"
 #include "term.h"
 #include "winpriv.h"
+#include "std.h"
 #include <stdarg.h>
+
+// ConPTY API — available since Windows 10 1809, ARM64 always has it.
+// PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE is only defined in headers when
+// _WIN32_WINNT >= 0x0A00; declare everything manually if the header skipped it.
+#ifndef PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE
+#define PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE ((DWORD)0x00020016)
+typedef VOID* HPCON;
+HRESULT WINAPI CreatePseudoConsole(COORD size, HANDLE hInput, HANDLE hOutput,
+                                   DWORD dwFlags, HPCON *phPC);
+HRESULT WINAPI ResizePseudoConsole(HPCON hPC, COORD size);
+void    WINAPI ClosePseudoConsole(HPCON hPC);
+#endif
+#ifndef EXTENDED_STARTUPINFO_PRESENT
+#define EXTENDED_STARTUPINFO_PRESENT 0x00080000
+#endif
+
 
 string child_dir = null;
 bool logging = false;
 
-void child_update_charset(void) {}
+static HPCON  hpc        = NULL;
+static HANDLE hpipe_in   = INVALID_HANDLE_VALUE;  // we write → child stdin
+static HANDLE hpipe_out  = INVALID_HANDLE_VALUE;  // child stdout → reader thread
+static HANDLE hproc      = NULL;
+static HANDLE hio_thread = NULL;
+static bool   child_killed = false;
 
-void child_create(char *argv[], struct winsize *winp)
+// Background thread: blocks on ReadFile and posts output to the main window.
+static DWORD WINAPI
+io_reader(LPVOID _)
 {
-  (void)argv; (void)winp;
+  (void)_;
+  char buf[4096];
+  DWORD nread;
+  while (ReadFile(hpipe_out, buf, sizeof buf, &nread, NULL) && nread > 0) {
+    char *copy = malloc(nread);
+    memcpy(copy, buf, nread);
+    PostMessage(wnd, WM_CONPTY_DATA, (WPARAM)copy, (LPARAM)nread);
+  }
+  // Pipe broken = child exited; wake main thread so it can call exit_mintty.
+  PostMessage(wnd, WM_CONPTY_DATA, (WPARAM)NULL, 0);
+  return 0;
 }
+
+// Write one argument into *pp using the standard Windows quoting rules:
+// backslashes before a '"' are doubled; '"' is escaped as '\"';
+// backslashes before end-of-string are doubled to avoid escaping the closing '"'.
+// Only wraps in quotes when the arg contains spaces, tabs, or quotes.
+static void
+quote_arg(wchar_t **pp, const wchar_t *arg)
+{
+  bool needs_quotes = !*arg;  // empty arg must be quoted
+  for (const wchar_t *p = arg; *p && !needs_quotes; p++)
+    if (*p == L' ' || *p == L'\t' || *p == L'"')
+      needs_quotes = true;
+
+  if (!needs_quotes) {
+    while (*arg) *(*pp)++ = *arg++;
+    return;
+  }
+
+  *(*pp)++ = L'"';
+  while (*arg) {
+    int nbs = 0;
+    while (*arg == L'\\') { nbs++; arg++; }
+
+    if (!*arg) {
+      // End of arg: double backslashes before the closing quote
+      for (int i = 0; i < nbs * 2; i++) *(*pp)++ = L'\\';
+      break;
+    } else if (*arg == L'"') {
+      // Literal quote: double the backslashes, then escape the quote
+      for (int i = 0; i < nbs * 2 + 1; i++) *(*pp)++ = L'\\';
+      *(*pp)++ = L'"';
+      arg++;
+    } else {
+      // Normal char: emit accumulated backslashes literally
+      for (int i = 0; i < nbs; i++) *(*pp)++ = L'\\';
+      *(*pp)++ = *arg++;
+    }
+  }
+  *(*pp)++ = L'"';
+}
+
+// Build a Windows command-line string from a UTF-8 argv array.
+// Caller must free the returned buffer.
+static wchar_t *
+build_cmdline(char *argv[])
+{
+  // Upper-bound size: 2x chars per arg (worst-case backslash doubling) + quotes + space
+  size_t total = 1;
+  for (int i = 0; argv[i]; i++) {
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, argv[i], -1, NULL, 0);
+    if (wlen < 1) wlen = 1;
+    total += 2 * wlen + 3;
+  }
+
+  wchar_t *cmdline = malloc(total * sizeof(wchar_t));
+  wchar_t *p = cmdline;
+  for (int i = 0; argv[i]; i++) {
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, argv[i], -1, NULL, 0);
+    wchar_t *arg = malloc(wlen * sizeof(wchar_t));
+    MultiByteToWideChar(CP_UTF8, 0, argv[i], -1, arg, wlen);
+    if (i > 0) *p++ = L' ';
+    quote_arg(&p, arg);
+    free(arg);
+  }
+  *p = L'\0';
+  return cmdline;
+}
+
+void
+child_create(char *argv[], struct winsize *winp)
+{
+  // Create pipe pairs for ConPTY I/O.
+  HANDLE pin_r, pin_w, pout_r, pout_w;
+  if (!CreatePipe(&pin_r,  &pin_w,  NULL, 0) ||
+      !CreatePipe(&pout_r, &pout_w, NULL, 0)) {
+    MessageBoxA(NULL, "CreatePipe failed", "mintty", MB_OK | MB_ICONERROR);
+    exit_mintty();
+    return;
+  }
+
+  // Create the pseudo console.
+  COORD size = { winp->ws_col, winp->ws_row };
+  HRESULT hr = CreatePseudoConsole(size, pin_r, pout_w, 0, &hpc);
+  CloseHandle(pin_r);   // now owned by ConPTY
+  CloseHandle(pout_w);  // now owned by ConPTY
+  if (FAILED(hr)) {
+    MessageBoxA(NULL, "CreatePseudoConsole failed", "mintty", MB_OK | MB_ICONERROR);
+    exit_mintty();
+    return;
+  }
+  hpipe_in  = pin_w;
+  hpipe_out = pout_r;
+
+  // Build STARTUPINFOEX with ConPTY attribute.
+  SIZE_T attr_sz = 0;
+  InitializeProcThreadAttributeList(NULL, 1, 0, &attr_sz);
+  LPPROC_THREAD_ATTRIBUTE_LIST attrlist = malloc(attr_sz);
+  InitializeProcThreadAttributeList(attrlist, 1, 0, &attr_sz);
+  UpdateProcThreadAttribute(attrlist, 0,
+    PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, hpc, sizeof(hpc), NULL, NULL);
+
+  STARTUPINFOEXW si = {0};
+  si.StartupInfo.cb = sizeof(si);
+  si.lpAttributeList = attrlist;
+
+  wchar_t *cmdline = build_cmdline(argv);
+
+  PROCESS_INFORMATION pi = {0};
+  BOOL ok = CreateProcessW(NULL, cmdline, NULL, NULL, FALSE,
+                           EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
+                           &si.StartupInfo, &pi);
+  free(cmdline);
+  DeleteProcThreadAttributeList(attrlist);
+  free(attrlist);
+
+  if (!ok) {
+    MessageBoxA(NULL, "CreateProcessW failed", "mintty", MB_OK | MB_ICONERROR);
+    exit_mintty();
+    return;
+  }
+
+  hproc = pi.hProcess;
+  CloseHandle(pi.hThread);
+
+  // Start reader thread: blocks on ReadFile, posts WM_CONPTY_DATA on output.
+  hio_thread = CreateThread(NULL, 0, io_reader, NULL, 0, NULL);
+}
+
+void child_update_charset(void) {}
 
 void toggle_logging(void) {}
 
-void child_proc(void) {}
+void
+child_proc(void)
+{
+  if (!hpc) return;
+  // Wait up to 100ms for Windows messages (including WM_CONPTY_DATA posted by
+  // the reader thread), mirroring the original select(win_fd, pty_fd, 100ms).
+  MsgWaitForMultipleObjects(0, NULL, FALSE, 100, QS_ALLINPUT);
+  // Message dispatching (WM_CONPTY_DATA → term_write) runs in the message loop.
+  // We only check for silent process exit here.
+  if (hproc && WaitForSingleObject(hproc, 0) == WAIT_OBJECT_0 && !child_killed)
+    exit_mintty();
+}
 
-void child_kill(bool point_blank)
+void
+child_kill(bool point_blank)
 {
   (void)point_blank;
+  child_killed = true;
+  if (hpc) { ClosePseudoConsole(hpc); hpc = NULL; }
+  if (hpipe_in != INVALID_HANDLE_VALUE) {
+    CloseHandle(hpipe_in); hpipe_in = INVALID_HANDLE_VALUE;
+  }
+  if (hproc) { TerminateProcess(hproc, 1); CloseHandle(hproc); hproc = NULL; }
   exit_mintty();
 }
 
-void child_write(const char *buf, uint len)
+void
+child_write(const char *buf, uint len)
 {
-  (void)buf; (void)len;
+  DWORD w;
+  if (hpipe_in != INVALID_HANDLE_VALUE)
+    WriteFile(hpipe_in, buf, (DWORD)len, &w, NULL);
 }
 
 void child_break(void) {}
 void child_intr(void) {}
 
-void child_printf(const char *fmt, ...)
+void
+child_printf(const char *fmt, ...)
 {
-  (void)fmt;
+  va_list va;
+  va_start(va, fmt);
+  char *msg;
+  if (vasprintf(&msg, fmt, va) >= 0) {
+    term_write(msg, strlen(msg));
+    free(msg);
+  }
+  va_end(va);
 }
 
-void child_send(const char *buf, uint len)
+void
+child_send(const char *buf, uint len)
 {
-  (void)buf; (void)len;
+  term_reset_screen();
+  if (term.echoing)
+    term_write(buf, len);
+  child_write(buf, len);
 }
 
-void child_sendw(const wchar *buf, uint len)
+void
+child_sendw(const wchar *buf, uint len)
 {
-  (void)buf; (void)len;
+  // Convert UTF-16 to UTF-8 for the ConPTY pipe.
+  int bytes = WideCharToMultiByte(CP_UTF8, 0, buf, len, NULL, 0, NULL, NULL);
+  if (bytes > 0) {
+    char *s = malloc(bytes);
+    WideCharToMultiByte(CP_UTF8, 0, buf, len, s, bytes, NULL, NULL);
+    child_send(s, bytes);
+    free(s);
+  }
 }
 
-void child_resize(struct winsize *winp)
+void
+child_resize(struct winsize *winp)
 {
-  (void)winp;
+  if (hpc) {
+    COORD c = { winp->ws_col, winp->ws_row };
+    ResizePseudoConsole(hpc, c);
+  }
 }
 
-bool child_is_alive(void)  { return false; }
+bool child_is_alive(void)  { return hproc && WaitForSingleObject(hproc, 0) == WAIT_TIMEOUT; }
 bool child_is_parent(void) { return false; }
 
 char *procres(int pid, char *res)

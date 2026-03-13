@@ -18,6 +18,11 @@
 #define WM_GETDPISCALEDSIZE 0x02E4
 #endif
 
+#ifdef __MINGW32__
+// WM_APP+1: ConPTY output data posted by reader thread. wp=heap buffer, lp=len.
+#define WM_CONPTY_DATA (WM_APP + 1)
+#endif
+
 extern HINSTANCE inst;  // The all-important instance handle
 extern HWND wnd;        // the main terminal window
 extern HIMC imc;        // the input method context

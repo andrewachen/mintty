@@ -6102,6 +6102,13 @@ typedef struct {
         hotkey = 0;
         win_global_keyboard_hook(false);
       }
+
+#ifdef __MINGW32__
+    when WM_CONPTY_DATA:
+      if (wp) { term_write((char *)wp, (uint)lp); free((char *)wp); }
+      else if (!child_is_alive()) exit_mintty();
+      return 0;
+#endif
   }
 
  /*
