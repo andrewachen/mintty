@@ -274,7 +274,13 @@ wchar *grandchild_process_list(void) { return null; }
 char  *child_tty(void)               { return null; }
 uchar *child_termios_chars(void)     { return null; }
 char  *foreground_prog(void)         { return null; }
-char  *foreground_cwd(void)          { return null; }
+char *
+foreground_cwd(void)
+{
+  if (child_dir && *child_dir)
+    return strdup(child_dir);
+  return null;
+}
 
 void user_command(wstring commands, int n)
 {
@@ -294,7 +300,7 @@ void child_fork(int argc, char *argv[], int moni, bool config_size, bool in_cwd,
 
 void child_set_fork_dir(char *dir)
 {
-  (void)dir;
+  strset(&child_dir, dir);
 }
 
 void setenvi(char *env, int val)
