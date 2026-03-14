@@ -137,7 +137,8 @@ child_create(char *argv[], struct winsize *winp)
   }
 
   // Create the pseudo console.
-  COORD size = { winp->ws_col, winp->ws_row };
+  // COORD fields are SHORT (signed 16-bit); clamp to avoid truncation.
+  COORD size = { (SHORT)min(winp->ws_col, 32767), (SHORT)min(winp->ws_row, 32767) };
   HRESULT hr = CreatePseudoConsole(size, pin_r, pout_w, 0, &hpc);
   CloseHandle(pin_r);   // now owned by ConPTY
   CloseHandle(pout_w);  // now owned by ConPTY
@@ -186,6 +187,14 @@ child_create(char *argv[], struct winsize *winp)
 
   // Start reader thread: blocks on ReadFile, posts WM_CONPTY_DATA on output.
   hio_thread = CreateThread(NULL, 0, io_reader, NULL, 0, NULL);
+  if (!hio_thread) {
+    ClosePseudoConsole(hpc);    hpc       = NULL;
+    CloseHandle(hpipe_in);     hpipe_in  = INVALID_HANDLE_VALUE;
+    CloseHandle(hpipe_out);    hpipe_out = INVALID_HANDLE_VALUE;
+    TerminateProcess(hproc, 1); CloseHandle(hproc); hproc = NULL;
+    MessageBoxA(NULL, "CreateThread failed", "mintty", MB_OK | MB_ICONERROR);
+    exit_mintty();
+  }
 }
 
 void child_update_charset(void) {}
@@ -276,7 +285,7 @@ void
 child_resize(struct winsize *winp)
 {
   if (hpc) {
-    COORD c = { winp->ws_col, winp->ws_row };
+    COORD c = { (SHORT)min(winp->ws_col, 32767), (SHORT)min(winp->ws_row, 32767) };
     ResizePseudoConsole(hpc, c);
   }
 }
