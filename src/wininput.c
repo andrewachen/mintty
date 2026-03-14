@@ -1071,6 +1071,9 @@ static bool alt_uni;
 static int lctrl_time = 0;
 static int ralt_time = 0;
 static int is_lctrl = 0;
+#ifdef __MINGW32__
+static bool wkd_lctrl = false;
+#endif
 static bool is_ralt = false;
 static bool is_altgr = false;
 
@@ -3048,7 +3051,7 @@ static bool wkd_char_key(void) {
 
   // Don't handle Ctrl combinations here.
   // Need to check there's a Ctrl that isn't part of Ctrl+LeftAlt==AltGr.
-  if ((wkd_ctrl & !wkd_ctrl_lalt_altgr) | (lctrl & wkd_rctrl))
+  if ((wkd_ctrl & !wkd_ctrl_lalt_altgr) | (wkd_lctrl & wkd_rctrl))
     return false;
 
   // Try the layout.
@@ -3082,7 +3085,7 @@ static bool wkd_altgr_key(void) {
 
   // Don't handle Ctrl combinations here.
   // Need to check there's a Ctrl that isn't part of Ctrl+LeftAlt==AltGr.
-  if ((wkd_ctrl & !wkd_ctrl_lalt_altgr) | (lctrl & wkd_rctrl))
+  if ((wkd_ctrl & !wkd_ctrl_lalt_altgr) | (wkd_lctrl & wkd_rctrl))
     return false;
 
   trace_alt("altgr_key -> layout alt %d\n", wkd_alt);
@@ -3288,7 +3291,11 @@ static LONG last_key_time = 0;
     }
   }
 
+#ifndef __MINGW32__
   bool lctrl;
+#else
+# define lctrl wkd_lctrl
+#endif
   // Distinguish real LCONTROL keypresses from fake messages sent for AltGr.
   // It's a fake if the next message is an RMENU with the same timestamp.
   // Or, as of buggy TeamViewer, if the RMENU comes soon after (#783).
@@ -4785,6 +4792,7 @@ static struct {
 # undef ctrl_ch
 # undef ctrl_key
 # undef vk_special
+# undef lctrl
 #endif  /* __MINGW32__ */
 
   return true;

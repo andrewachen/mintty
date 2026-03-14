@@ -118,7 +118,7 @@ name_ver := $(NAME)-$(srcversion)
 
 c_srcs := $(wildcard *.c)
 ifeq ($(platform), clangarm64)
-  c_srcs := $(filter-out child.c, $(c_srcs)) child_mingw.c
+  c_srcs := $(filter-out child.c regis.c, $(c_srcs)) child_mingw.c
 endif
 rc_srcs := $(wildcard *.rc)
 objs := $(c_srcs:.c=.o) $(rc_srcs:.rc=.o)
@@ -145,8 +145,8 @@ scriptlib=-lusp10
 #downldlib="${SYSTEMROOT}/System32/urlmon.dll"
 downldlib=
 ifneq ($(platform), msys)
-  emojilib = -lGdiPlus
-  scriptlib += -lDWrite
+  emojilib = -lgdiplus
+  scriptlib += -ldwrite
 endif
 extralibs=$(scriptlib) $(downldlib) $(emojilib) -lshlwapi
 ifeq ($(platform), clangarm64)
