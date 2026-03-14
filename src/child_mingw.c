@@ -338,7 +338,18 @@ void setenvi(char *env, int val)
   _putenv_s(env, valbuf);
 }
 
+void child_close_log(void) {}
+
 void child_launch(int n, int argc, char *argv[], int moni)
 {
   (void)n; (void)argc; (void)argv; (void)moni;
+}
+
+// ReGIS graphics not supported on CLANGARM64 (regis.c uses GNU nested functions)
+#include "regis.h"
+void regis_draw(HDC dc, float scale, int w, int h, int mode,
+                uchar * regis, bool first_draw, flush_fn flush)
+{
+  (void)dc; (void)scale; (void)w; (void)h; (void)mode;
+  (void)regis; (void)first_draw; (void)flush;
 }

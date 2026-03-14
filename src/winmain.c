@@ -354,6 +354,7 @@ wslpath_(char * path)
 #endif  /* __MINGW32__: wslpath_ */
 
 // WSL path conversion, using wsl.exe
+#ifndef __MINGW32__
 /*
    Capture output of cmd, using Windows CreateProcess
    - variants with Posix functions work
@@ -425,6 +426,7 @@ cmd_out_capture_start_process(char * cmd)
   else
     return 0;
 }
+#endif  /* !__MINGW32__ */
 
 // WSL path conversion, using wsl.exe
 char *

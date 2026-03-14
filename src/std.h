@@ -83,10 +83,12 @@ extern char *asform(const char *fmt, ...);
 //#define WINVER 0x0501	// Windows XP
 //#define WINVER 0x0601	// Windows 7
 //#define WINVER 0x0A00	// Windows 10
+#ifndef WINVER
 #if CYGWIN_VERSION_API_MINOR >= 74
 #define WINVER 0x0A00
 #else
 #define WINVER 0x0501
+#endif
 #endif
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT WINVER
