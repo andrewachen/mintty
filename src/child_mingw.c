@@ -42,8 +42,10 @@ io_reader(LPVOID _)
   DWORD nread;
   while (ReadFile(hpipe_out, buf, sizeof buf, &nread, NULL) && nread > 0) {
     char *copy = malloc(nread);
+    if (!copy) break;  // OOM: let pipe-break sentinel signal exit
     memcpy(copy, buf, nread);
-    PostMessage(wnd, WM_CONPTY_DATA, (WPARAM)copy, (LPARAM)nread);
+    if (!PostMessage(wnd, WM_CONPTY_DATA, (WPARAM)copy, (LPARAM)nread))
+      free(copy);
   }
   // Pipe broken = child exited; wake main thread so it can call exit_mintty.
   PostMessage(wnd, WM_CONPTY_DATA, (WPARAM)NULL, 0);
@@ -122,8 +124,13 @@ child_create(char *argv[], struct winsize *winp)
 {
   // Create pipe pairs for ConPTY I/O.
   HANDLE pin_r, pin_w, pout_r, pout_w;
-  if (!CreatePipe(&pin_r,  &pin_w,  NULL, 0) ||
-      !CreatePipe(&pout_r, &pout_w, NULL, 0)) {
+  if (!CreatePipe(&pin_r, &pin_w, NULL, 0)) {
+    MessageBoxA(NULL, "CreatePipe failed", "mintty", MB_OK | MB_ICONERROR);
+    exit_mintty();
+    return;
+  }
+  if (!CreatePipe(&pout_r, &pout_w, NULL, 0)) {
+    CloseHandle(pin_r); CloseHandle(pin_w);
     MessageBoxA(NULL, "CreatePipe failed", "mintty", MB_OK | MB_ICONERROR);
     exit_mintty();
     return;
@@ -135,6 +142,7 @@ child_create(char *argv[], struct winsize *winp)
   CloseHandle(pin_r);   // now owned by ConPTY
   CloseHandle(pout_w);  // now owned by ConPTY
   if (FAILED(hr)) {
+    CloseHandle(pin_w); CloseHandle(pout_r);
     MessageBoxA(NULL, "CreatePseudoConsole failed", "mintty", MB_OK | MB_ICONERROR);
     exit_mintty();
     return;
@@ -165,6 +173,9 @@ child_create(char *argv[], struct winsize *winp)
   free(attrlist);
 
   if (!ok) {
+    ClosePseudoConsole(hpc);    hpc       = NULL;
+    CloseHandle(hpipe_in);     hpipe_in  = INVALID_HANDLE_VALUE;
+    CloseHandle(hpipe_out);    hpipe_out = INVALID_HANDLE_VALUE;
     MessageBoxA(NULL, "CreateProcessW failed", "mintty", MB_OK | MB_ICONERROR);
     exit_mintty();
     return;
@@ -203,7 +214,15 @@ child_kill(bool point_blank)
   if (hpipe_in != INVALID_HANDLE_VALUE) {
     CloseHandle(hpipe_in); hpipe_in = INVALID_HANDLE_VALUE;
   }
+  // Close output pipe so ReadFile in the reader thread unblocks and exits.
+  if (hpipe_out != INVALID_HANDLE_VALUE) {
+    CloseHandle(hpipe_out); hpipe_out = INVALID_HANDLE_VALUE;
+  }
   if (hproc) { TerminateProcess(hproc, 1); CloseHandle(hproc); hproc = NULL; }
+  if (hio_thread) {
+    WaitForSingleObject(hio_thread, 1000);
+    CloseHandle(hio_thread); hio_thread = NULL;
+  }
   exit_mintty();
 }
 
