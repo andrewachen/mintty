@@ -84,7 +84,7 @@ extern char *asform(const char *fmt, ...);
 //#define WINVER 0x0601	// Windows 7
 //#define WINVER 0x0A00	// Windows 10
 #ifndef WINVER
-#if CYGWIN_VERSION_API_MINOR >= 74
+#if CYGWIN_VERSION_API_MINOR >= 74 || defined(__MINGW32__)
 #define WINVER 0x0A00
 #else
 #define WINVER 0x0501
