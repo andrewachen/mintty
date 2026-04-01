@@ -138,6 +138,8 @@ ifneq ($(platform), clangarm64)
 ifeq ($(shell VER=`$(CC) -dumpversion`; expr $${VER%%.*} '>=' 5), 1)
   CFLAGS += -mtune=atom $(SECUR)
 endif
+else
+  CFLAGS += -mcpu=oryon-1
 endif
 
 scriptlib=-lusp10
