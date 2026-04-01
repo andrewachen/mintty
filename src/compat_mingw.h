@@ -242,4 +242,21 @@ typedef uint64_t u_int64_t;
 // --- fstat (used in winimg.c) — available in MinGW via sys/stat.h ---
 #include <sys/stat.h>
 
+// --- access() and mode constants (used by WSL code paths) ---
+// _NO_OLDNAMES suppresses the POSIX alias; restore it via _access.
+// Windows has no execute bit; X_OK maps to existence check.
+#define access _access
+#ifndef R_OK
+#define R_OK 4
+#endif
+#ifndef W_OK
+#define W_OK 2
+#endif
+#ifndef X_OK
+#define X_OK 0
+#endif
+#ifndef F_OK
+#define F_OK 0
+#endif
+
 #endif /* COMPAT_MINGW_H */

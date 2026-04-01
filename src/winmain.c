@@ -256,7 +256,7 @@ static BOOL (WINAPI * pSetGestureConfig)(HWND, DWORD, UINT, GESTURECONFIG*, UINT
 wchar *
 getregstr(HKEY key, wstring subkey, wstring attribute)
 {
-#if CYGWIN_VERSION_API_MINOR < 74
+#if CYGWIN_VERSION_API_MINOR < 74 && !defined(__MINGW32__)
   (void)key;
   (void)subkey;
   (void)attribute;
@@ -288,7 +288,7 @@ getregstr(HKEY key, wstring subkey, wstring attribute)
 uint
 getregval(HKEY key, wstring subkey, wstring attribute, uint def)
 {
-#if CYGWIN_VERSION_API_MINOR < 74
+#if CYGWIN_VERSION_API_MINOR < 74 && !defined(__MINGW32__)
   (void)key;
   (void)subkey;
   (void)attribute;
@@ -6510,7 +6510,7 @@ rel1:
 }
 
 
-#if CYGWIN_VERSION_API_MINOR >= 74
+#if CYGWIN_VERSION_API_MINOR >= 74 || defined(__MINGW32__)
 
 static HKEY
 regopen(HKEY key, wstring subkey)
@@ -6527,45 +6527,26 @@ regclose(HKEY key)
     RegCloseKey(key);
 }
 
-static int
-getlxssinfo(bool list, wstring wslname, uint * wsl_ver,
-            char ** wsl_guid, wstring * wsl_rootfs, wstring * wsl_icon)
+// Build the legacy WSL icon path (%LOCALAPPDATA%/lxss/bash.ico).
+static wchar *
+legacy_icon(void)
 {
-  static wstring lxsskeyname = W("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss");
-  HKEY lxss = regopen(HKEY_CURRENT_USER, lxsskeyname);
-  if (!lxss)
-    return 1;
-
-#ifdef use_wsl_getdistconf
-  typedef enum
-  {
-    WSL_DISTRIBUTION_FLAGS_NONE = 0,
-    //...
-  } WSL_DISTRIBUTION_FLAGS;
-  HRESULT (WINAPI * pWslGetDistributionConfiguration)
-           (PCWSTR name, ULONG *distVersion, ULONG *defaultUID,
-            WSL_DISTRIBUTION_FLAGS *,
-            PSTR **defaultEnvVars, ULONG *defaultEnvVarCount
-           ) =
-    // this works only in 64 bit mode
-    load_library_func("wslapi.dll", "WslGetDistributionConfiguration");
-#endif
-
-  wchar * legacy_icon()
-  {
-    // "%LOCALAPPDATA%/lxss/bash.ico"
-    char * icf = getenv("LOCALAPPDATA");
-    if (icf) {
-      wchar * icon = cs__mbstowcs(icf);
-      icon = renewn(icon, wcslen(icon) + 15);
-      wcscat(icon, W("\\lxss\\bash.ico"));
-      return icon;
-    }
-    return 0;
+  char * icf = getenv("LOCALAPPDATA");
+  if (icf) {
+    wchar * icon = cs__mbstowcs(icf);
+    icon = renewn(icon, wcslen(icon) + 15);
+    wcscat(icon, W("\\lxss\\bash.ico"));
+    return icon;
   }
+  return 0;
+}
 
-  int getlxssdistinfo(bool list, HKEY lxss, wchar * guid)
-  {
+// Look up a single WSL distribution's info from the Lxss registry key.
+static int
+getlxssdistinfo(bool list, HKEY lxss, wchar * guid,
+                wstring wslname_param, uint * wsl_ver_p,
+                char ** wsl_guid_p, wstring * wsl_rootfs_p, wstring * wsl_icon_p)
+{
     wchar * rootfs = 0;
     wchar * icon = 0;
 
@@ -6603,6 +6584,7 @@ getlxssinfo(bool list, wstring wslname, uint * wsl_ver,
         // then we check whether the PackageFullName is part of the target,
         // in which case we have found the specific launcher 
         // and use it as an icon resource file
+#ifndef __MINGW32__
         DIR * d = opendir(winapps);
         if (d) {
           char * pack = cs__wcstombs(pfn);
@@ -6626,6 +6608,11 @@ getlxssinfo(bool list, wstring wslname, uint * wsl_ver,
           closedir(d);
           free(winapps);
         }
+#else
+        // MinGW: readlink unavailable; skip WindowsApps exe scanning.
+        // Icon discovery falls through to the ProgramW6432 path below.
+        free(winapps);
+#endif
       }
 
       // check "%ProgramW6432%/WindowsApps/<PackageFullName>/images/icon.ico"
@@ -6700,30 +6687,40 @@ getlxssinfo(bool list, wstring wslname, uint * wsl_ver,
       printf("-- icon %ls\n", icon);
     }
 
-    *wsl_icon = icon;
-    *wsl_ver = 1 + ((getregval(lxss, guid, W("Flags"), 0) >> 3) & 1);
-    *wsl_guid = cs__wcstoutf(guid);
+    *wsl_icon_p = icon;
+    *wsl_ver_p = 1 + ((getregval(lxss, guid, W("Flags"), 0) >> 3) & 1);
+    *wsl_guid_p = cs__wcstoutf(guid);
     char * rootdir = path_win_w_to_posix(rootfs);
     struct stat fstat_buf;
     if (stat (rootdir, & fstat_buf) == 0 && S_ISDIR (fstat_buf.st_mode)) {
-      *wsl_rootfs = rootfs;
+      *wsl_rootfs_p = rootfs;
     }
-    else if (wslname) {
+    else if (wslname_param) {
       free(rootfs);
-      rootfs = newn(wchar, wcslen(wslname) + 8);
+      rootfs = newn(wchar, wcslen(wslname_param) + 8);
       wcscpy(rootfs, W("\\\\wsl$\\"));
-      wcscat(rootfs, wslname);
-      *wsl_rootfs = rootfs;
+      wcscat(rootfs, wslname_param);
+      *wsl_rootfs_p = rootfs;
     }
     free(rootdir);
     return 0;
-  }
+}
+
+static int
+getlxssinfo(bool list, wstring wslname, uint * wsl_ver,
+            char ** wsl_guid, wstring * wsl_rootfs, wstring * wsl_icon)
+{
+  static wstring lxsskeyname = W("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Lxss");
+  HKEY lxss = regopen(HKEY_CURRENT_USER, lxsskeyname);
+  if (!lxss)
+    return 1;
 
   if (!list && (!wslname || !*wslname)) {
     wchar * dd = getregstr(HKEY_CURRENT_USER, lxsskeyname, W("DefaultDistribution"));
     int err;
     if (dd) {
-      err = getlxssdistinfo(false, lxss, dd);
+      err = getlxssdistinfo(false, lxss, dd,
+                            wslname, wsl_ver, wsl_guid, wsl_rootfs, wsl_icon);
       free(dd);
     }
     else {  // Legacy "Bash on Windows" installed only, no registry info
@@ -6774,10 +6771,12 @@ getlxssinfo(bool list, wstring wslname, uint * wsl_ver,
           wchar * dn = getregstr(lxss, subkey, W("DistributionName"));
           //printf("list %d dn <%ls> wslname <%ls> lxss %p subkey <%ls>\n", list, dn, wslname, lxss, subkey);
           if (list) {
-            getlxssdistinfo(true, lxss, subkey);
+            getlxssdistinfo(true, lxss, subkey,
+                            wslname, wsl_ver, wsl_guid, wsl_rootfs, wsl_icon);
           }
           else if (dn && 0 == wcscmp(dn, wslname)) {
-            int err = getlxssdistinfo(false, lxss, subkey);
+            int err = getlxssdistinfo(false, lxss, subkey,
+                                      wslname, wsl_ver, wsl_guid, wsl_rootfs, wsl_icon);
             regclose(lxss);
             return err;
           }
@@ -6847,6 +6846,26 @@ select_WSL(char * wsl)
   return err;
 }
 
+// Get APPX-redirected local app data path (for wsltty.appx packaging).
+static char *
+getlocalappdata_(void)
+{
+#ifndef KF_FLAG_FORCE_APP_DATA_REDIRECTION
+#define KF_FLAG_FORCE_APP_DATA_REDIRECTION 0x00080000
+#endif
+  HMODULE shell = load_sys_library("shell32.dll");
+  HRESULT (WINAPI *pSHGetKnownFolderPath)(const GUID*, DWORD, HANDLE, wchar**) =
+    (void *)GetProcAddress(shell, "SHGetKnownFolderPath");
+  if (!pSHGetKnownFolderPath)
+    return 0;
+  wchar * wlappdata;
+  long hres = pSHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_FORCE_APP_DATA_REDIRECTION, 0, &wlappdata);
+  if (hres)
+    return 0;
+  else
+    return path_win_w_to_posix(wlappdata);
+}
+
 #endif
 
 
@@ -6878,7 +6897,7 @@ wslicon(wchar * params)
 {
   wstring icon = 0;  // default: no icon
 
-#if CYGWIN_VERSION_API_MINOR >= 74
+#if CYGWIN_VERSION_API_MINOR >= 74 || defined(__MINGW32__)
   char * iconfile = 0;
   char * systemroot = getenv("SYSTEMROOT");
   if (systemroot && wcsstr(params, W("-e cmd")))
@@ -7221,7 +7240,7 @@ opts[] = {
   {"nobidi",     no_argument,       0, ''},  // short option not enabled
   {"nortl",      no_argument,       0, ''},  // short option not enabled
   {"wsl",        no_argument,       0, ''},  // short option not enabled
-#if CYGWIN_VERSION_API_MINOR >= 74
+#if CYGWIN_VERSION_API_MINOR >= 74 || defined(__MINGW32__)
   {"WSL",        optional_argument, 0, ''},  // short option not enabled
   {"WSLmode",    optional_argument, 0, ''},  // short option not enabled
 #endif
@@ -7400,13 +7419,21 @@ main(int argc, char *argv[])
 # endif
 
   // Options triggered via wsl*.exe
-#if CYGWIN_VERSION_API_MINOR >= 74
+#if CYGWIN_VERSION_API_MINOR >= 74 || defined(__MINGW32__)
   char * exename = *argv;
   const char * exebasename = strrchr(exename, '/');
   if (exebasename)
     exebasename ++;
   else
     exebasename = exename;
+#ifdef __MINGW32__
+  // Also check backslash separator on native Windows paths
+  {
+    const char * bs = strrchr(exename, '\\');
+    if (bs && (!exebasename || bs > exebasename))
+      exebasename = bs + 1;
+  }
+#endif
   if (0 == strncmp(exebasename, "wsl", 3)) {
     char * exearg = strchr(exebasename, '-');
     if (exearg)
@@ -7420,34 +7447,15 @@ main(int argc, char *argv[])
     }
   }
 
-  char * getlocalappdata(void)
-  {
-    // get appx-redirected system dir, as investigated by Biswapriyo Nath
-#ifndef KF_FLAG_FORCE_APP_DATA_REDIRECTION
-#define KF_FLAG_FORCE_APP_DATA_REDIRECTION 0x00080000
-#endif
-    HMODULE shell = load_sys_library("shell32.dll");
-    HRESULT (WINAPI *pSHGetKnownFolderPath)(const GUID*, DWORD, HANDLE, wchar**) =
-      (void *)GetProcAddress(shell, "SHGetKnownFolderPath");
-    if (!pSHGetKnownFolderPath)
-      return 0;
-    wchar * wlappdata;
-    long hres = pSHGetKnownFolderPath(&FOLDERID_LocalAppData, KF_FLAG_FORCE_APP_DATA_REDIRECTION, 0, &wlappdata);
-    if (hres)
-      return 0;
-    else
-      return path_win_w_to_posix(wlappdata);
-  }
-
   char * lappdata = 0;
   if (wsltty_appx)
-    lappdata = getlocalappdata();
+    lappdata = getlocalappdata_();
 #endif
 
   // Load config files
   // try global config file
   load_config("/etc/minttyrc", true);
-#if CYGWIN_VERSION_API_MINOR >= 74
+#if CYGWIN_VERSION_API_MINOR >= 74 || defined(__MINGW32__)
   // try Windows APPX local config location (wsltty.appx#3)
   if (wsltty_appx && lappdata && *lappdata) {
     string rc_file = asform("%s/.minttyrc", lappdata);
@@ -7522,7 +7530,7 @@ main(int argc, char *argv[])
       when 'C': load_config(optarg, false);
       when '': support_wsl = true;
       when '': wsl_basepath = path_posix_to_win_w(optarg);
-#if CYGWIN_VERSION_API_MINOR >= 74
+#if CYGWIN_VERSION_API_MINOR >= 74 || defined(__MINGW32__)
       when '': {
         int err = select_WSL(optarg);
         if (err)
@@ -7646,7 +7654,7 @@ main(int argc, char *argv[])
           when 'R':
             list_printers();
             exit(0);
-#if CYGWIN_VERSION_API_MINOR >= 74
+#if CYGWIN_VERSION_API_MINOR >= 74 || defined(__MINGW32__)
           when 'W': {
             wstring wsl_icon;
             getlxssinfo(true, 0, &wsl_ver, &wsl_guid, &wsl_basepath, &wsl_icon);

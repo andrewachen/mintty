@@ -165,10 +165,22 @@ child_create(char *argv[], struct winsize *winp)
 
   wchar_t *cmdline = build_cmdline(argv);
 
+  // When cmd differs from argv[0] (e.g. login shell: cmd="wsl", argv[0]="-wsl"),
+  // pass cmd as the executable via lpApplicationName so Windows doesn't try to
+  // launch the display name.  This mirrors execvp(cmd, argv) semantics.
+  wchar_t *exe = NULL;
+  extern char *cmd;
+  if (cmd && argv[0] && strcmp(cmd, argv[0]) != 0) {
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, cmd, -1, NULL, 0);
+    exe = malloc(wlen * sizeof(wchar_t));
+    MultiByteToWideChar(CP_UTF8, 0, cmd, -1, exe, wlen);
+  }
+
   PROCESS_INFORMATION pi = {0};
-  BOOL ok = CreateProcessW(NULL, cmdline, NULL, NULL, FALSE,
+  BOOL ok = CreateProcessW(exe, cmdline, NULL, NULL, FALSE,
                            EXTENDED_STARTUPINFO_PRESENT, NULL, NULL,
                            &si.StartupInfo, &pi);
+  free(exe);
   free(cmdline);
   DeleteProcThreadAttributeList(attrlist);
   free(attrlist);
